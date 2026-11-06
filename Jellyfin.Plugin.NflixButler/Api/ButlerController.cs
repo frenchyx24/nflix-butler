@@ -39,6 +39,7 @@ public class ButlerController : ControllerBase
     [HttpGet("web/nav.js")]
     public IActionResult NavScript() => Content(Resource("nav.js"), "application/javascript; charset=utf-8");
 
+    [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/status")]
     public IActionResult Status()
     {
@@ -67,9 +68,11 @@ public class ButlerController : ControllerBase
         });
     }
 
+    [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/entries")]
     public IActionResult Entries([FromQuery] int limit = 100) => Ok(new { entries = _store.Recent(limit) });
 
+    [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/unmatched")]
     public IActionResult Unmatched([FromQuery] int limit = 50) => Ok(new
     {

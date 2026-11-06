@@ -26,6 +26,7 @@ public sealed class ButlerEngine
     private readonly ILibraryManager _library;
     private readonly ILibraryMonitor _monitor;
     private readonly IProviderManager _providers;
+    private readonly IDirectoryService _directoryService;
     private readonly ILogger<ButlerEngine> _logger;
     private readonly StateStore _store;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -35,12 +36,14 @@ public sealed class ButlerEngine
         ILibraryManager library,
         ILibraryMonitor monitor,
         IProviderManager providers,
+        IDirectoryService directoryService,
         StateStore store,
         ILogger<ButlerEngine> logger)
     {
         _library = library;
         _monitor = monitor;
         _providers = providers;
+        _directoryService = directoryService;
         _store = store;
         _logger = logger;
     }
@@ -227,12 +230,27 @@ public sealed class ButlerEngine
     public async Task<int> RepairAsync(int max, CancellationToken cancellationToken)
     {
         var repaired = 0;
-        var candidates = UnmatchedItems(max * 4);
-        _logger.LogInformation("Nflix Butler: {Count} item(s) sans identifiant externe", candidates.Count);
+        var candidates = NeedsAttentionItems(max * 4);
+        _logger.LogInformation("Nflix Butler: {Count} fiche(s) à compléter (identifiant, image ou résumé manquant)", candidates.Count);
+
         foreach (var item in candidates.Take(Math.Clamp(max, 1, 100)))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false))
+            var hasIds = item.ProviderIds is { Count: > 0 };
+
+            if (!hasIds)
+            {
+                if (await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false))
+                {
+                    repaired++;
+                    _store.State.Repaired++;
+                }
+
+                continue;
+            }
+
+            // Identified already: only the missing picture or summary is repaired, never the match.
+            if (QueueRefresh(item))
             {
                 repaired++;
                 _store.State.Repaired++;
@@ -245,6 +263,57 @@ public sealed class ButlerEngine
         }
 
         return repaired;
+    }
+
+    /// <summary>Asks Jellyfin to re-fetch images and metadata for one item, keeping its current match.</summary>
+    private bool QueueRefresh(BaseItem item)
+    {
+        try
+        {
+            var options = new MetadataRefreshOptions(_directoryService)
+            {
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllMetadata = false,
+                ReplaceAllImages = false,
+            };
+
+            _providers.QueueRefresh(item.Id, options, RefreshPriority.Normal);
+            _logger.LogInformation("Nflix Butler: rafraîchissement demandé pour « {Name} »", item.Name);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nflix Butler: cannot queue a refresh for {Name}", item.Name);
+            return false;
+        }
+    }
+
+    /// <summary>Items that miss an external id, a primary image or a summary.</summary>
+    public IReadOnlyList<BaseItem> NeedsAttentionItems(int limit)
+    {
+        try
+        {
+            return _library
+                .GetItemList(new InternalItemsQuery
+                {
+                    Recursive = true,
+                    IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Series },
+                })
+                .Where(item => !string.IsNullOrEmpty(item.Path))
+                .Where(item => item.ProviderIds is null
+                    || item.ProviderIds.Count == 0
+                    || !item.HasImage(ImageType.Primary)
+                    || string.IsNullOrWhiteSpace(item.Overview))
+                .OrderByDescending(item => item.DateCreated)
+                .Take(Math.Clamp(limit, 1, 1000))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nflix Butler: cannot list the items to complete");
+            return Array.Empty<BaseItem>();
+        }
     }
 
     /// <summary>Repairs one item, from the dashboard.</summary>
