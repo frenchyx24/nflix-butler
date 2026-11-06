@@ -30,6 +30,7 @@ public sealed class ButlerEngine
     private readonly ILogger<ButlerEngine> _logger;
     private readonly StateStore _store;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Dictionary<Guid, DateTime> _recentAttempts = new();
     private bool _diagnosed;
 
     public ButlerEngine(
@@ -236,6 +237,15 @@ public sealed class ButlerEngine
         foreach (var item in candidates.Take(Math.Clamp(max, 1, 100)))
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // A repair that the providers cannot complete must not be retried on every pass.
+            if (_recentAttempts.TryGetValue(item.Id, out var lastAttempt)
+                && DateTime.UtcNow - lastAttempt < TimeSpan.FromHours(6))
+            {
+                continue;
+            }
+
+            _recentAttempts[item.Id] = DateTime.UtcNow;
             var hasIds = item.ProviderIds is { Count: > 0 };
 
             if (!hasIds)

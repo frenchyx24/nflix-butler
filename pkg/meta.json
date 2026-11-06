@@ -8,7 +8,7 @@
   "status": "Active",
   "autoUpdate": false,
   "targetAbi": "12.4.0.0",
-  "version": "0.1.4.0",
-  "changelog": "Aucun déplacement ni renommage. Détecte les nouveaux fichiers, fait relire à Jellyfin le dossier concerné, répare les fiches incomplètes (identifiant IMDb/TMDb, image principale, résumé) et diagnostique la bibliothèque au démarrage. Toutes les routes sont réservées aux administrateurs.",
+  "version": "0.1.5.0",
+  "changelog": "Bêta. Ne déplace ni ne renomme aucun fichier. Détecte les nouveautés, relit uniquement le dossier concerné, complète les fiches sans identifiant, sans image ou sans résumé, avec temporisation de 6 h pour ne jamais boucler. Diagnostic de la bibliothèque au démarrage. Routes réservées aux administrateurs.",
   "timestamp": "2026-11-06T00:00:00.0000000Z"
 }
