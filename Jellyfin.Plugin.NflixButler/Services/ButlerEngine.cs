@@ -29,6 +29,7 @@ public sealed class ButlerEngine
     private readonly ILogger<ButlerEngine> _logger;
     private readonly StateStore _store;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private bool _diagnosed;
 
     public ButlerEngine(
         ILibraryManager library,
@@ -102,6 +103,12 @@ public sealed class ButlerEngine
             var budget = Math.Clamp(config.MaxRefreshesPerRun, 1, 200);
             var touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            if (!_diagnosed)
+            {
+                _diagnosed = true;
+                Diagnose();
+            }
+
             foreach (var root in Roots())
             {
                 if (cancellationToken.IsCancellationRequested || budget <= 0)
@@ -154,6 +161,66 @@ public sealed class ButlerEngine
             Running = false;
             _gate.Release();
         }
+    }
+
+    /// <summary>Counts what the library really contains, so the admin sees why a pass repairs nothing.</summary>
+    public void Diagnose()
+    {
+        try
+        {
+            var items = _library.GetItemList(new InternalItemsQuery
+            {
+                Recursive = true,
+                IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Episode },
+            });
+
+            var movies = items.Count(item => item is Movie);
+            var series = items.Count(item => item is Series);
+            var episodes = items.Count(item => item is Episode);
+            var noIds = items.Count(item => item.ProviderIds is null || item.ProviderIds.Count == 0);
+            var noImdb = items.Count(item => item.ProviderIds is null
+                || (!item.ProviderIds.ContainsKey("Imdb") && !item.ProviderIds.ContainsKey("Tmdb") && !item.ProviderIds.ContainsKey("Tvdb")));
+            var noImage = items.Count(item => !item.HasImage(ImageType.Primary));
+            var looksRaw = items.Count(item => LooksLikeFileName(item.Name));
+
+            _logger.LogInformation(
+                "Nflix Butler: bibliothèque = {Movies} films, {Series} séries, {Episodes} épisodes",
+                movies,
+                series,
+                episodes);
+            _logger.LogInformation(
+                "Nflix Butler: sans aucun identifiant = {NoIds}, sans IMDb/TMDb/TVDB = {NoImdb}, sans image = {NoImage}, nom brut de fichier = {LooksRaw}",
+                noIds,
+                noImdb,
+                noImage,
+                looksRaw);
+
+            foreach (var item in items.Where(item => LooksLikeFileName(item.Name)).Take(10))
+            {
+                _logger.LogInformation("Nflix Butler: nom brut « {Name} » ({Path})", item.Name, item.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nflix Butler: diagnostic failed");
+        }
+    }
+
+    private static bool LooksLikeFileName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        return name.Contains("1080", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("720", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("x264", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("x265", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("BluRay", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("WEB-DL", StringComparison.OrdinalIgnoreCase)
+            || name.Contains(".mkv", StringComparison.OrdinalIgnoreCase)
+            || name.Contains(".mp4", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Asks the metadata providers to identify items that have no external id yet.</summary>

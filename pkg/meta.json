@@ -8,7 +8,7 @@
   "status": "Active",
   "autoUpdate": false,
   "targetAbi": "12.4.0.0",
-  "version": "0.1.2.0",
-  "changelog": "Ne déplace ni ne renomme aucun fichier. Surveille les dossiers, fait relire à Jellyfin uniquement le dossier concerné, et répare l’identification IMDb/TMDb des fiches restées vides. Journalise le nombre de fiches sans identifiant à chaque passe.",
+  "version": "0.1.3.0",
+  "changelog": "Aucun déplacement ni renommage. Diagnostic de la bibliothèque au démarrage (films, séries, épisodes, fiches sans identifiant, sans image, noms bruts), relecture ciblée du dossier qui change, réparation IMDb/TMDb des fiches vides.",
   "timestamp": "2026-11-06T00:00:00.0000000Z"
 }
