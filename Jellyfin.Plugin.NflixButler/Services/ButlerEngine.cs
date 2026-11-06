@@ -160,7 +160,9 @@ public sealed class ButlerEngine
     public async Task<int> RepairAsync(int max, CancellationToken cancellationToken)
     {
         var repaired = 0;
-        foreach (var item in UnmatchedItems(max * 4).Take(Math.Clamp(max, 1, 100)))
+        var candidates = UnmatchedItems(max * 4);
+        _logger.LogInformation("Nflix Butler: {Count} item(s) sans identifiant externe", candidates.Count);
+        foreach (var item in candidates.Take(Math.Clamp(max, 1, 100)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false))
