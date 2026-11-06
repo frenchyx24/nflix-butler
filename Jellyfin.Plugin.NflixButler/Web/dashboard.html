@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nflix Butler</title>
+  <style>
+    :root { --bg: #0b0b10; --card: #15161d; --accent: #e50914; --text: #f5f5f7; --muted: #9aa0aa; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 1.5rem; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+    .header h1 { font-size: 1.75rem; margin: 0; }
+    .header .subtitle { font-size: 0.9rem; color: var(--muted); margin: 0.25rem 0 0; }
+    .badge { padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+    .badge.running { background: #2e7d32; color: white; }
+    .badge.idle { background: var(--muted); color: var(--bg); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .stat { background: var(--card); padding: 1rem; border-radius: 0.5rem; }
+    .stat h3 { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.5rem; text-transform: uppercase; }
+    .stat p { margin: 0; font-size: 1.5rem; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+    @media (max-width: 768px) { .columns { grid-template-columns: 1fr; } }
+    .column { background: var(--card); padding: 1rem; border-radius: 0.5rem; }
+    .column h2 { margin: 0 0 1rem; font-size: 1.25rem; }
+    .column .muted { font-size: 0.8rem; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+    th { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }
+    .pill { padding: 0.25rem 0.5rem; border-radius: 1rem; font-size: 0.75rem; font-weight: 600; }
+    .pill.ok { background: #2e7d32; color: white; }
+    .pill.pending { background: #ff9800; color: black; }
+    .pill.needs-review { background: #ff5722; color: white; }
+    .pill.failed { background: #d32f2f; color: white; }
+    .unmatched { display: grid; gap: 1rem; }
+    .unmatched-item { display: grid; grid-template-columns: 1fr auto; gap: 1rem; padding: 1rem; background: rgba(229, 9, 20, 0.1); border-radius: 0.5rem; }
+    .unmatched-item p { margin: 0; }
+    .unmatched-item .path { font-size: 0.8rem; color: var(--muted); word-break: break-all; }
+    .unmatched-item .type { font-size: 0.8rem; text-transform: uppercase; }
+    .unmatched-item button { padding: 0.5rem 1rem; border: none; border-radius: 0.25rem; background: var(--accent); color: white; cursor: pointer; }
+    .unmatched-item button:disabled { background: var(--muted); cursor: not-allowed; }
+    .unmatched-item button + button { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); z-index: 100; }
+    .modal.active { display: flex; justify-content: center; align-items: center; }
+    .modal-content { background: var(--card); padding: 2rem; border-radius: 0.5rem; width: 100%; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+    .modal h2 { margin: 0 0 1.5rem; }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 0.5rem; background: var(--bg); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 0.25rem; color: var(--text); }
+    .form-actions { display: flex; justify-content: flex-end; gap: 1rem; margin-top: 2rem; }
+    .form-actions button { padding: 0.5rem 1.5rem; border: none; border-radius: 0.25rem; cursor: pointer; }
+    .form-actions .save { background: var(--accent); color: white; }
+    .form-actions .cancel { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+    .toast { position: fixed; bottom: 1rem; right: 1rem; background: var(--accent); color: white; padding: 0.75rem 1.5rem; border-radius: 0.25rem; z-index: 1000; }
+    .error-banner { background: #d32f2f; color: white; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
+    .error-banner button { background: rgba(255, 255, 255, 0.2); color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.25rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Nflix Butler</h1>
+      <p class="subtitle">Rangement et mise à jour de la bibliothèque</p>
+    </div>
+    <div style="display: flex; gap: 1rem; align-items: center;">
+      <span class="badge" id="status-badge">...</span>
+      <button id="run-now">Analyser maintenant</button>
+      <button id="settings">Réglages</button>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><h3>Fichiers vus</h3><p id="runs">0</p></div>
+    <div class="stat"><h3>Classés</h3><p id="filed">0</p></div>
+    <div class="stat"><h3>Réparés</h3><p id="repaired">0</p></div>
+    <div class="stat"><h3>En attente</h3><p id="pending">0</p></div>
+    <div class="stat"><h3>Dernier passage</h3><p id="last-run">Jamais</p></div>
+  </div>
+
+  <div class="columns">
+    <div class="column">
+      <h2>Dernières prises en charge</h2>
+      <p class="muted" id="entries-message"></p>
+      <div style="overflow-x: auto;">
+        <table id="entries-table">
+          <thead>
+            <tr>
+              <th>Heure</th>
+              <th>Titre</th>
+              <th>Bibliothèque</th>
+              <th>Action</th>
+              <th>Statut</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="column">
+      <h2>Non identifiés</h2>
+      <div class="unmatched" id="unmatched"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="settings-modal">
+    <div class="modal-content">
+      <h2>Réglages</h2>
+      <div class="form-group">
+        <label for="enabled">Activé</label>
+        <input type="checkbox" id="enabled">
+      </div>
+      <div class="form-group">
+        <label for="pollSeconds">Intervalle de vérification (secondes)</label>
+        <input type="number" id="pollSeconds" min="10">
+      </div>
+      <div class="form-group">
+        <label for="autoOrganize">Organiser automatiquement</label>
+        <input type="checkbox" id="autoOrganize">
+      </div>
+      <div class="form-group">
+        <label for="fixUnmatched">Réparer les non identifiés</label>
+        <input type="checkbox" id="fixUnmatched">
+      </div>
+      <div class="form-group">
+        <label for="maxRepairsPerRun">Réparations max par passage</label>
+        <input type="number" id="maxRepairsPerRun" min="1">
+      </div>
+      <div class="form-group">
+        <label for="minFileSizeMb">Taille min de fichier (Mo)</label>
+        <input type="number" id="minFileSizeMb" min="1">
+      </div>
+      <div class="form-group">
+        <label for="movieLibrary">Bibliothèque Films</label>
+        <input type="text" id="movieLibrary">
+      </div>
+      <div class="form-group">
+        <label for="seriesLibrary">Bibliothèque Séries</label>
+        <input type="text" id="seriesLibrary">
+      </div>
+      <div class="form-group">
+        <label for="animeLibrary">Bibliothèque Anime</label>
+        <input type="text" id="animeLibrary">
+      </div>
+      <div class="form-group">
+        <label for="extraRoots">Dossiers supplémentaires (virgule)</label>
+        <input type="text" id="extraRoots">
+      </div>
+      <div class="form-group">
+        <label for="animeKeywords">Mots-clés Anime (virgule)</label>
+        <input type="text" id="animeKeywords">
+      </div>
+      <div class="form-actions">
+        <button class="cancel" id="cancel-settings">Annuler</button>
+        <button class="save" id="save-settings">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" style="display: none;"></div>
+  <div class="error-banner" id="error-banner" style="display: none;">
+    <span id="error-message"></span>
+    <button id="retry">Réessayer</button>
+  </div>
+
+  <script>
+    function token() {
+      try {
+        const raw = localStorage.getItem('jellyfin_credentials');
+        const data = JSON.parse(raw || '{}');
+        return (data.Servers && data.Servers[0] && data.Servers[0].AccessToken) || localStorage.getItem('nflix_butler_key') || '';
+      } catch (e) { return ''; }
+    }
+
+    async function api(path, options) {
+      const response = await fetch('/Plugins/NflixButler/api' + path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', 'X-Emby-Token': token(), ...(options && options.headers) },
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return 'Jamais';
+      const now = new Date();
+      const then = new Date(iso);
+      const diff = Math.floor((now - then) / 1000);
+      if (diff < 60) return 'à l’instant';
+      if (diff < 3600) return `il y a ${Math.floor(diff / 60)} min`;
+      if (diff < 86400) return `il y a ${Math.floor(diff / 3600)} h`;
+      return `il y a ${Math.floor(diff / 86400)} j`;
+    }
+
+    function updateStats(status) {
+      document.getElementById('runs').textContent = status.runs;
+      document.getElementById('filed').textContent = status.filed;
+      document.getElementById('repaired').textContent = status.repaired;
+      document.getElementById('pending').textContent = status.pending;
+      document.getElementById('last-run').textContent = relativeTime(status.lastRunUtc);
+      document.getElementById('status-badge').className = 'badge ' + (status.running ? 'running' : 'idle');
+      document.getElementById('status-badge').textContent = status.running ? 'En cours' : 'Inactif';
+    }
+
+    function updateEntries(entries) {
+      const tbody = document.querySelector('#entries-table tbody');
+      tbody.innerHTML = '';
+      const message = document.getElementById('entries-message');
+      message.textContent = entries.length ? `Affichage de ${entries.length} entrées` : '';
+
+      entries.forEach(entry => {
+        const tr = document.createElement('tr');
+        const time = new Date(entry.atUtc).toLocaleTimeString('fr-FR');
+        const title = entry.kind === 'episode' ? `${entry.title} S${entry.season.toString().padStart(2, '0')}E${entry.episode.toString().padStart(2, '0')}` : entry.title;
+        const statusClass = entry.status === 'ok' ? 'ok' : entry.status === 'pending' ? 'pending' : entry.status === 'needs-review' ? 'needs-review' : 'failed';
+
+        tr.innerHTML = `
+          <td>${time}</td>
+          <td>${title}</td>
+          <td>${entry.library}</td>
+          <td>${entry.action}</td>
+          <td><span class="pill ${statusClass}">${entry.status}</span></td>
+        `;
+        if (entry.itemId) {
+          const td = document.createElement('td');
+          const a = document.createElement('a');
+          a.href = '#';
+          a.textContent = 'Voir';
+          a.onclick = (e) => { e.preventDefault(); window.open('/web/index.html#!/details?id=' + entry.itemId); };
+          td.appendChild(a);
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      });
+    }
+
+    function updateUnmatched(items) {
+      const container = document.getElementById('unmatched');
+      container.innerHTML = '';
+      items.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'unmatched-item';
+        div.innerHTML = `
+          <div>
+            <p>${item.name}</p>
+            <p class="type">${item.type}</p>
+            <p class="path">${item.path}</p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button data-id="${item.itemId}" class="fix">Réparer</button>
+            <button data-id="${item.itemId}" class="refresh">Rafraîchir</button>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+
+      container.querySelectorAll('.fix').forEach(button => {
+        button.onclick = async () => {
+          button.disabled = true;
+          button.textContent = '...';
+          try {
+            await api(`/fix/${button.dataset.id}`, { method: 'POST' });
+            showToast('Réparé');
+            loadUnmatched();
+          } catch (e) {
+            showError(e.message);
+          }
+        };
+      });
+
+      container.querySelectorAll('.refresh').forEach(button => {
+        button.onclick = async () => {
+          button.disabled = true;
+          button.textContent = '...';
+          try {
+            await api(`/refresh/${button.dataset.id}`, { method: 'POST' });
+            showToast('Rafraîchi');
+            loadUnmatched();
+          } catch (e) {
+            showError(e.message);
+          }
+        };
+      });
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.style.display = 'block';
+      setTimeout(() => { toast.style.display = 'none'; }, 3000);
+    }
+
+    function showError(message) {
+      const banner = document.getElementById('error-banner');
+      const msg = document.getElementById('error-message');
+      msg.textContent = message;
+      banner.style.display = 'flex';
+    }
+
+    function hideError() {
+      document.getElementById('error-banner').style.display = 'none';
+    }
+
+    async function loadStatus() {
+      try {
+        const status = await api('/status');
+        updateStats(status);
+        return status;
+      } catch (e) {
+        showError(e.message);
+        return null;
+      }
+    }
+
+    async function loadEntries() {
+      try {
+        const { entries } = await api('/entries?limit=100');
+        updateEntries(entries);
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+
+    async function loadUnmatched() {
+      try {
+        const { items } = await api('/unmatched?limit=50');
+        updateUnmatched(items);
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+
+    async function loadSettings() {
+      try {
+        const settings = await api('/settings');
+        document.getElementById('enabled').checked = settings.enabled;
+        document.getElementById('pollSeconds').value = settings.pollSeconds;
+        document.getElementById('autoOrganize').checked = settings.autoOrganize;
+        document.getElementById('fixUnmatched').checked = settings.fixUnmatched;
+        document.getElementById('maxRepairsPerRun').value = settings.maxRepairsPerRun;
+        document.getElementById('minFileSizeMb').value = settings.minFileSizeMb;
+        document.getElementById('movieLibrary').value = settings.movieLibrary;
+        document.getElementById('seriesLibrary').value = settings.seriesLibrary;
+        document.getElementById('animeLibrary').value = settings.animeLibrary;
+        document.getElementById('extraRoots').value = settings.extraRoots.join(', ');
+        document.getElementById('animeKeywords').value = settings.animeKeywords.join(', ');
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+
+    async function saveSettings() {
+      const settings = {
+        enabled: document.getElementById('enabled').checked,
+        pollSeconds: parseInt(document.getElementById('pollSeconds').value),
+        autoOrganize: document.getElementById('autoOrganize').checked,
+        fixUnmatched: document.getElementById('fixUnmatched').checked,
+        maxRepairsPerRun: parseInt(document.getElementById('maxRepairsPerRun').value),
+        minFileSizeMb: parseInt(document.getElementById('minFileSizeMb').value),
+        movieLibrary: document.getElementById('movieLibrary').value,
+        seriesLibrary: document.getElementById('seriesLibrary').value,
+        animeLibrary: document.getElementById('animeLibrary').value,
+        extraRoots: document.getElementById('extraRoots').value.split(',').map(s => s.trim()).filter(Boolean),
+        animeKeywords: document.getElementById('animeKeywords').value.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      try {
+        await api('/settings', { method: 'POST', body: JSON.stringify(settings) });
+        showToast('Réglages enregistrés');
+        document.getElementById('settings-modal').classList.remove('active');
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+
+    document.getElementById('run-now').onclick = async () => {
+      try {
+        await api('/run-now', { method: 'POST' });
+        showToast('Analyse lancée');
+      } catch (e) {
+        showError(e.message);
+      }
+    };
+
+    document.getElementById('settings').onclick = () => {
+      document.getElementById('settings-modal').classList.add('active');
+    };
+
+    document.getElementById('cancel-settings').onclick = () => {
+      document.getElementById('settings-modal').classList.remove('active');
+    };
+
+    document.getElementById('save-settings').onclick = saveSettings;
+
+    document.getElementById('retry').onclick = () => {
+      hideError();
+      load();
+    };
+
+    document.getElementById('settings-modal').onclick = (e) => {
+      if (e.target === document.getElementById('settings-modal')) {
+        document.getElementById('settings-modal').classList.remove('active');
+      }
+    };
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.getElementById('settings-modal').classList.remove('active');
+      }
+    });
+
+    async function load() {
+      if (!token()) {
+        showError('Ouvrez cette page depuis Jellyfin ou collez une clé API dans le champ ci-dessous.');
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.placeholder = 'Clé API Jellyfin';
+        input.style.marginTop = '1rem';
+        input.style.width = '100%';
+        input.onchange = () => {
+          localStorage.setItem('nflix_butler_key', input.value);
+          hideError();
+          load();
+        };
+        document.getElementById('error-message').appendChild(input);
+        return;
+      }
+
+      const status = await loadStatus();
+      if (!status) return;
+      await loadEntries();
+      await loadUnmatched();
+    }
+
+    let interval;
+    function startPolling() {
+      load();
+      interval = setInterval(load, 10000);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          load();
+        } else {
+          clearInterval(interval);
+        }
+      });
+    }
+
+    startPolling();
+  </script>
+</body>
+</html>

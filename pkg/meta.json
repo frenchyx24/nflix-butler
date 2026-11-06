@@ -1,0 +1,14 @@
+{
+  "guid": "7f3c1a52-9b64-4d0e-8f21-6c1d2ba94e77",
+  "name": "Nflix Butler",
+  "description": "Rangement automatique des nouveaux médias, bibliothèques mieux associées, et réparation ciblée des fiches que Jellyfin ne sait pas identifier.",
+  "overview": "Surveille les dossiers, classe les nouveautés, rafraîchit uniquement ce qu'il touche et répare les fiches sans identifiant.",
+  "owner": "frenchyx24",
+  "category": "General",
+  "status": "Active",
+  "autoUpdate": false,
+  "targetAbi": "12.4.0.0",
+  "version": "0.1.0.0",
+  "changelog": "Première version: surveillance continue, classement, rafraîchissement ciblé, réparation des fiches non identifiées, tableau de bord web et API.",
+  "timestamp": "2026-11-06T00:00:00.0000000Z"
+}
