@@ -12,15 +12,14 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Querying;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.NflixButler.Services;
 
 /// <summary>
-/// The butler itself: snapshot the watched folders, file what is new or misplaced, refresh only the
-/// folders it touched, and repair items whose metadata lookup came back empty.
+/// The butler never moves or renames a file. It watches the folders for new arrivals, asks Jellyfin
+/// to re-read only the folders that changed, and repairs the items whose identification came back
+/// empty so the metadata providers can attach the right IMDb/TMDb entry.
 /// </summary>
 public sealed class ButlerEngine
 {
@@ -50,7 +49,7 @@ public sealed class ButlerEngine
     /// <summary>Gets a value indicating whether a pass is running.</summary>
     public bool Running { get; private set; }
 
-    /// <summary>Gets the folders currently watched: Jellyfin libraries plus the extra roots.</summary>
+    /// <summary>Gets the folders watched: Jellyfin library roots plus the extra roots.</summary>
     public IReadOnlyList<string> Roots()
     {
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -83,7 +82,7 @@ public sealed class ButlerEngine
         return roots.Where(Directory.Exists).ToList();
     }
 
-    /// <summary>One full pass: detect, file, refresh, repair.</summary>
+    /// <summary>One pass: detect new files, refresh their folders, then repair unnamed items.</summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         if (!await _gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
@@ -100,19 +99,33 @@ public sealed class ButlerEngine
                 return;
             }
 
-            var roots = Roots();
-            var seenNow = 0;
-            foreach (var root in roots)
+            var budget = Math.Clamp(config.MaxRefreshesPerRun, 1, 200);
+            var touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var root in Roots())
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                if (cancellationToken.IsCancellationRequested || budget <= 0)
+                {
+                    break;
+                }
+
                 foreach (var file in EnumerateVideos(root, config))
                 {
-                    if (cancellationToken.IsCancellationRequested || seenNow >= 200)
+                    if (cancellationToken.IsCancellationRequested || budget <= 0)
                     {
                         break;
                     }
 
-                    seenNow += await HandleFileAsync(root, file, config, cancellationToken).ConfigureAwait(false);
+                    if (RecordNewFile(root, file, config))
+                    {
+                        budget--;
+                        var folder = Path.GetDirectoryName(file);
+                        if (!string.IsNullOrEmpty(folder) && touched.Add(folder))
+                        {
+                            // Targeted only: Jellyfin re-reads this folder, never the whole library.
+                            _monitor.ReportFileSystemChanged(folder);
+                        }
+                    }
                 }
             }
 
@@ -143,11 +156,11 @@ public sealed class ButlerEngine
         }
     }
 
-    /// <summary>Asks the metadata providers to identify items that have no external id.</summary>
+    /// <summary>Asks the metadata providers to identify items that have no external id yet.</summary>
     public async Task<int> RepairAsync(int max, CancellationToken cancellationToken)
     {
         var repaired = 0;
-        foreach (var item in UnmatchedItems(max * 4).Take(Math.Max(1, max)))
+        foreach (var item in UnmatchedItems(max * 4).Take(Math.Clamp(max, 1, 100)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false))
@@ -166,10 +179,16 @@ public sealed class ButlerEngine
     }
 
     /// <summary>Repairs one item, from the dashboard.</summary>
-    public async Task<bool> FixItemAsync(Guid itemId, CancellationToken cancellationToken)
+    public async Task<(bool Fixed, string? Name)> FixItemAsync(Guid itemId, CancellationToken cancellationToken)
     {
         var item = _library.GetItemById(itemId);
-        return item != null && await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false);
+        if (item is null)
+        {
+            return (false, null);
+        }
+
+        var fixedItem = await TryIdentifyAsync(item, cancellationToken).ConfigureAwait(false);
+        return (fixedItem, item.Name);
     }
 
     /// <summary>Re-reads one item's folder without touching the rest of the library.</summary>
@@ -195,7 +214,7 @@ public sealed class ButlerEngine
         var query = new InternalItemsQuery
         {
             Recursive = true,
-            IncludeItemTypes = new BaseItemKind[] { BaseItemKind.Movie, BaseItemKind.Series },
+            IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Series },
             Limit = Math.Clamp(limit, 1, 1000),
         };
 
@@ -228,7 +247,6 @@ public sealed class ButlerEngine
         }
 
         var parsed = MediaClassifier.Parse(path, Configuration.AnimeKeywords);
-        var year = parsed.Year;
 
         try
         {
@@ -236,12 +254,28 @@ public sealed class ButlerEngine
             {
                 var search = new RemoteSearchQuery<MovieInfo>
                 {
-                    SearchInfo = new MovieInfo { Name = parsed.Title, Year = year },
+                    SearchInfo = new MovieInfo { Name = parsed.Title, Year = parsed.Year },
                     IncludeDisabledProviders = false,
                 };
                 var results = await _providers.GetRemoteSearchResults<Movie, MovieInfo>(search, cancellationToken).ConfigureAwait(false);
-                var match = results.FirstOrDefault(result => result?.ProviderIds is { Count: > 0 } || !string.IsNullOrWhiteSpace(result?.Name));
-                if (match is null)
+                var match = results.FirstOrDefault(result => result?.ProviderIds is { Count: > 0 });
+                if (match?.ProviderIds is null)
+                {
+                    return false;
+                }
+
+                Apply(item, match.ProviderIds, match.Name, match.ProductionYear);
+            }
+            else if (item is Series)
+            {
+                var search = new RemoteSearchQuery<SeriesInfo>
+                {
+                    SearchInfo = new SeriesInfo { Name = parsed.Title, Year = parsed.Year },
+                    IncludeDisabledProviders = false,
+                };
+                var results = await _providers.GetRemoteSearchResults<Series, SeriesInfo>(search, cancellationToken).ConfigureAwait(false);
+                var match = results.FirstOrDefault(result => result?.ProviderIds is { Count: > 0 });
+                if (match?.ProviderIds is null)
                 {
                     return false;
                 }
@@ -250,22 +284,12 @@ public sealed class ButlerEngine
             }
             else
             {
-                var search = new RemoteSearchQuery<SeriesInfo>
-                {
-                    SearchInfo = new SeriesInfo { Name = parsed.Title, Year = year },
-                    IncludeDisabledProviders = false,
-                };
-                var results = await _providers.GetRemoteSearchResults<Series, SeriesInfo>(search, cancellationToken).ConfigureAwait(false);
-                var match = results.FirstOrDefault(result => result?.ProviderIds is { Count: > 0 } || !string.IsNullOrWhiteSpace(result?.Name));
-                if (match is null)
-                {
-                    return false;
-                }
-
-                Apply(item, match.ProviderIds, match.Name, match.ProductionYear);
+                return false;
             }
 
             await _library.UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+
+            // Jellyfin now knows the external id: let it re-read this folder only.
             var folder = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(folder))
             {
@@ -282,15 +306,12 @@ public sealed class ButlerEngine
         }
     }
 
-    private static void Apply(BaseItem target, Dictionary<string, string>? providerIds, string? name, int? year)
+    private static void Apply(BaseItem target, Dictionary<string, string> providerIds, string? name, int? year)
     {
-        if (providerIds is { Count: > 0 })
+        target.ProviderIds ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in providerIds)
         {
-            target.ProviderIds ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var pair in providerIds)
-            {
-                target.ProviderIds[pair.Key] = pair.Value;
-            }
+            target.ProviderIds[pair.Key] = pair.Value;
         }
 
         if (!string.IsNullOrWhiteSpace(name))
@@ -304,7 +325,8 @@ public sealed class ButlerEngine
         }
     }
 
-    private async Task<int> HandleFileAsync(string root, string path, PluginConfiguration config, CancellationToken cancellationToken)
+    /// <summary>Records a file the first time it is seen. Returns true when it is new.</summary>
+    private bool RecordNewFile(string root, string path, PluginConfiguration config)
     {
         FileInfo info;
         try
@@ -312,22 +334,22 @@ public sealed class ButlerEngine
             info = new FileInfo(path);
             if (!info.Exists || info.Length < Math.Max(1, config.MinFileSizeMb) * 1024L * 1024L)
             {
-                return 0;
+                return false;
             }
         }
         catch (IOException)
         {
-            return 0;
+            return false;
         }
 
         if (_store.AlreadySeen(path, info.Length, info.LastWriteTimeUtc))
         {
-            return 0;
+            return false;
         }
 
-        var inheritedAnimation = MediaClassifier.MatchesAnimation(root, config.AnimeKeywords);
-        var parsed = MediaClassifier.Parse(path, config.AnimeKeywords, inheritedAnimation);
-        var library = MediaClassifier.PickLibrary(parsed, config);
+        var parsed = MediaClassifier.Parse(path, config.AnimeKeywords);
+        var suggested = MediaClassifier.PickLibrary(parsed, config);
+        var current = Path.GetFileName(root);
         var entry = new IntakeEntry
         {
             Path = path,
@@ -336,67 +358,20 @@ public sealed class ButlerEngine
             Year = parsed.Year,
             Season = parsed.Season,
             Episode = parsed.Episode,
-            Library = library,
+            Library = suggested,
             SizeBytes = info.Length,
+            Action = "refreshed",
+            Status = "ok",
+            Message = string.Equals(current, suggested, StringComparison.OrdinalIgnoreCase)
+                ? "Dossier rafraîchi."
+                : $"Détecté dans « {current} », semble appartenir à « {suggested} ».",
         };
 
-        var target = MediaClassifier.TargetPath(parsed, root, library);
-        var action = "detected";
-        var status = "pending";
-
-        if (config.AutoOrganize && !string.Equals(Path.GetFullPath(target), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
-        {
-            try
-            {
-                var folder = Path.GetDirectoryName(target);
-                if (!string.IsNullOrEmpty(folder))
-                {
-                    Directory.CreateDirectory(folder);
-                }
-
-                if (File.Exists(target))
-                {
-                    action = "duplicate";
-                    status = "needs-review";
-                    entry.Message = "Destination déjà présente, fichier laissé en place.";
-                }
-                else
-                {
-                    File.Move(path, target);
-                    action = "filed";
-                    status = "ok";
-                    entry.Destination = target;
-                    _store.State.Filed++;
-                    _monitor.ReportFileSystemChanged(Path.GetDirectoryName(target)!);
-                    var previous = Path.GetDirectoryName(path);
-                    if (!string.IsNullOrEmpty(previous) && !string.Equals(previous, Path.GetDirectoryName(target), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _monitor.ReportFileSystemChanged(previous);
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                action = "failed";
-                status = "failed";
-                entry.Message = ex.Message;
-                _logger.LogWarning(ex, "Nflix Butler: cannot file {Path}", path);
-            }
-        }
-        else
-        {
-            _monitor.ReportFileSystemChanged(Path.GetDirectoryName(path) ?? root);
-            status = "ok";
-            entry.Message = "Déjà au bon endroit, rafraîchi.";
-        }
-
-        entry.Action = action;
-        entry.Status = status;
         _store.MarkSeen(path, info.Length, info.LastWriteTimeUtc);
         _store.Add(entry, config.KeepEntries);
         _store.Save();
-        await Task.CompletedTask.ConfigureAwait(false);
-        return 1;
+        _logger.LogInformation("Nflix Butler: new file {Path}", path);
+        return true;
     }
 
     private IEnumerable<string> EnumerateVideos(string root, PluginConfiguration config)

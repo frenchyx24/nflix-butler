@@ -19,9 +19,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Extra roots to watch. Library roots from Jellyfin are always watched.</summary>
     public string[] ExtraRoots { get; set; } = Array.Empty<string>();
 
-    /// <summary>Move files that landed in the wrong library, or whose name Jellyfin cannot parse.</summary>
-    public bool AutoOrganize { get; set; } = true;
-
     /// <summary>Library name used for films.</summary>
     public string MovieLibrary { get; set; } = "Films";
 
@@ -49,6 +46,9 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>How many repairs one pass may attempt, so a cold library never floods the server.</summary>
     public int MaxRepairsPerRun { get; set; } = 8;
+
+    /// <summary>How many new files one pass may hand to Jellyfin, so a bulk copy never floods it.</summary>
+    public int MaxRefreshesPerRun { get; set; } = 40;
 
     /// <summary>Keep this many intake entries in memory and on disk.</summary>
     public int KeepEntries { get; set; } = 500;

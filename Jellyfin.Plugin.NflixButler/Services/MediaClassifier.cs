@@ -76,25 +76,6 @@ public static class MediaClassifier
         return new ParsedMedia("movie", movieTitle, year, 0, 0, isAnimation, rawName);
     }
 
-    /// <summary>The canonical path Jellyfin indexes without ambiguity.</summary>
-    public static string TargetPath(ParsedMedia media, string libraryRoot, string libraryName)
-    {
-        if (media.Kind == "episode")
-        {
-            var series = SafeName(media.Title);
-            var folder = media.Year is null ? series : $"{series} ({media.Year})";
-            var seasonFolder = $"Season {media.Season:00}";
-            var fileName = $"{series} S{media.Season:00}E{media.Episode:00}";
-            var ext = Path.GetExtension(media.FileName.Length > 0 ? media.FileName : "video.mkv");
-            var folderPath = Path.Combine(libraryRoot, libraryName, folder, seasonFolder);
-            return Path.Combine(folderPath, fileName + (ext.Length > 0 ? ext : ".mkv"));
-        }
-
-        var movieFolder = media.Year is null ? SafeName(media.Title) : $"{SafeName(media.Title)} ({media.Year})";
-        var movieExt = Path.GetExtension(media.FileName.Length > 0 ? media.FileName : "video.mkv");
-        return Path.Combine(libraryRoot, libraryName, movieFolder, movieFolder + (movieExt.Length > 0 ? movieExt : ".mkv"));
-    }
-
     /// <summary>Which library a parsed file belongs to.</summary>
     public static string PickLibrary(ParsedMedia media, Configuration.PluginConfiguration config) =>
         media.IsAnimation ? config.AnimeLibrary

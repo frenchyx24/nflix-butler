@@ -19,6 +19,5 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         serviceCollection.AddSingleton<ButlerEngine>();
         serviceCollection.AddHostedService<ButlerHostedService>();
-        serviceCollection.AddHostedService<WebInjection>();
     }
 }

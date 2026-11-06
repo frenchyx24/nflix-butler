@@ -55,7 +55,6 @@ public class ButlerController : ControllerBase
             repaired = state.Repaired,
             pending = state.Entries.Count(entry => entry.Status is "pending" or "needs-review"),
             pollSeconds = config.PollSeconds,
-            autoOrganize = config.AutoOrganize,
             fixUnmatched = config.FixUnmatched,
             roots = _engine.Roots(),
             libraries = new
@@ -96,8 +95,8 @@ public class ButlerController : ControllerBase
     [HttpPost("api/fix/{itemId:guid}")]
     public async Task<IActionResult> Fix([FromRoute] Guid itemId, CancellationToken cancellationToken)
     {
-        var fixedItem = await _engine.FixItemAsync(itemId, cancellationToken).ConfigureAwait(false);
-        return Ok(new { @fixed = fixedItem });
+        var (fixedItem, name) = await _engine.FixItemAsync(itemId, cancellationToken).ConfigureAwait(false);
+        return Ok(new { @fixed = fixedItem, name });
     }
 
     [Authorize(Policy = "RequiresElevation")]
