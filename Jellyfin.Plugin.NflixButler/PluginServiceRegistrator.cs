@@ -19,5 +19,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         serviceCollection.AddSingleton<ButlerEngine>();
         serviceCollection.AddHostedService<ButlerHostedService>();
+        serviceCollection.AddSingleton<YtMusicService>();
     }
 }
