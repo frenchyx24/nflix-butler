@@ -252,21 +252,17 @@ public class YtMusicController : ControllerBase
         Directory.CreateDirectory(targetDir);
         var outTemplate = Path.Combine(targetDir, "%(title)s.%(ext)s");
 
+        // Plain m4a download, no ffmpeg post-processing (the container has none): the artist
+        // folder + clean file name carry the metadata for Jellyfin's own scanner.
         await YtMusicServiceRun(list =>
         {
             list.Add("-q");
             list.Add("--no-warnings");
-            list.Add("-x");
-            list.Add("--audio-format");
-            list.Add("m4a");
-            list.Add("--audio-quality");
-            list.Add("0");
+            list.Add("-f");
+            list.Add("bestaudio[ext=m4a]/bestaudio");
             list.Add("-o");
             list.Add(outTemplate);
-            list.Add("--embed-metadata");
-            list.Add("--embed-thumbnail");
-            if (!string.IsNullOrEmpty(item.Artist)) { list.Add("--add-metadata"); list.Add("artist=" + item.Artist); }
-            if (!string.IsNullOrEmpty(item.Album)) { list.Add("--add-metadata"); list.Add("album=" + item.Album); }
+            list.Add("--no-playlist");
             list.Add("https://www.youtube.com/watch?v=" + request.VideoId);
         }, ct);
 
@@ -277,7 +273,9 @@ public class YtMusicController : ControllerBase
         if (file == null)
             return StatusCode(502, new { message = "Téléchargement terminé mais aucun .m4a trouvé." });
 
-        var folderItem = _library.FindByPath(targetDir, true);
+        var folderItem = _library.FindByPath(targetDir, true)
+            ?? _library.FindByPath(folder, true)
+            ?? _library.FindByPath(Path.GetDirectoryName(folder.TrimEnd('/')) ?? folder, true);
         if (folderItem != null)
         {
             var options = new MetadataRefreshOptions(_directoryService)
