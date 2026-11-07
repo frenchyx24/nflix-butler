@@ -56,6 +56,21 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Add a dashboard link to the Jellyfin web client at startup.</summary>
     public bool InjectWebDashboard { get; set; } = true;
 
+    /// <summary>OAuth redirect URI for streaming-account linking (must match the Deezer/Spotify app settings).</summary>
+    public string SyncRedirectUri { get; set; } = "https://nflix.miracloud.fr/sync-callback";
+
+    /// <summary>Deezer application id (create one at deezer.com/developers).</summary>
+    public string DeezerAppId { get; set; } = "";
+
+    /// <summary>Deezer application secret.</summary>
+    public string DeezerAppSecret { get; set; } = "";
+
+    /// <summary>Spotify application client id (create one at developer.spotify.com).</summary>
+    public string SpotifyClientId { get; set; } = "";
+
+    /// <summary>Spotify application client secret.</summary>
+    public string SpotifyClientSecret { get; set; } = "";
+
     /// <summary>Folder where YouTube Music downloads land (inside the music library, refreshed after each download).</summary>
     public string YtMusicFolder { get; set; } = "/media/plex/Musiques/YouTube";
 
