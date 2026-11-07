@@ -34,6 +34,10 @@ public class ButlerController : ControllerBase
     [HttpGet("web/dashboard")]
     public IActionResult Dashboard() => Content(Resource("dashboard.html"), "text/html; charset=utf-8");
 
+    [AllowAnonymous]
+    [HttpGet("web/config")]
+    public IActionResult ConfigPage() => Content(Resource("config.html"), "text/html; charset=utf-8");
+
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/status")]
     public IActionResult Status()
@@ -105,6 +109,7 @@ public class ButlerController : ControllerBase
         return Ok(new { refreshed = true });
     }
 
+    [Authorize(Policy = "RequiresElevation")]
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/settings")]
     public IActionResult Settings() => Ok(Configuration);

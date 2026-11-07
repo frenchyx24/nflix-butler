@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nflix Butler — réglages</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #0b0b10; color: #e8e8ee; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  h2 { font-size: 1rem; margin: 24px 0 8px; color: #9a9ab0; text-transform: uppercase; letter-spacing: .06em; }
+  p.muted { color: #9a9ab0; font-size: .85rem; margin: 0 0 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  label { display: block; font-size: .8rem; color: #9a9ab0; margin-bottom: 4px; }
+  input[type=text], input[type=number], input[type=password], textarea {
+    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid #2a2a38;
+    background: #14141d; color: #e8e8ee; font-size: .9rem;
+  }
+  textarea { min-height: 64px; font-family: inherit; }
+  .check { display: flex; align-items: center; gap: 8px; padding: 9px 0; font-size: .9rem; }
+  .check input { width: 18px; height: 18px; accent-color: #e50914; }
+  .actions { display: flex; gap: 10px; margin-top: 24px; align-items: center; }
+  button {
+    padding: 10px 18px; border-radius: 8px; border: 0; cursor: pointer; font-size: .9rem; font-weight: 600;
+    background: #e50914; color: #fff;
+  }
+  button.secondary { background: #23232f; color: #e8e8ee; }
+  #msg { font-size: .85rem; color: #4ade80; }
+  #err { font-size: .85rem; color: #f87171; }
+  a { color: #e50914; }
+</style>
+</head>
+<body>
+<h1>Nflix Butler</h1>
+<p class="muted">Réglages du greffon. <a href="/Plugins/NflixButler/web/dashboard" target="_blank">Ouvrir le tableau de bord</a></p>
+<div id="err"></div>
+<form id="f">
+  <h2>Surveillance</h2>
+  <div class="grid">
+    <div><label>Activé</label><div class="check"><input type="checkbox" id="Enabled"></div></div>
+    <div><label>Intervalle de scrutation (s)</label><input type="number" id="PollSeconds"></div>
+    <div><label>Dossiers supplémentaires (séparés par des virgules)</label><input type="text" id="ExtraRoots"></div>
+    <div><label>Taille minimale d'un fichier (Mo)</label><input type="number" id="MinFileSizeMb"></div>
+    <div><label>Extensions vidéo reconnues (séparées par des virgules)</label><input type="text" id="VideoExtensions"></div>
+    <div><label>Dossiers ignorés (séparés par des virgules)</label><input type="text" id="SkipFolders"></div>
+  </div>
+  <h2>Bibliothèques</h2>
+  <div class="grid">
+    <div><label>Films</label><input type="text" id="MovieLibrary"></div>
+    <div><label>Séries</label><input type="text" id="SeriesLibrary"></div>
+    <div><label>Animés</label><input type="text" id="AnimeLibrary"></div>
+    <div><label>Mots-clés anime (séparés par des virgules)</label><input type="text" id="AnimeKeywords"></div>
+  </div>
+  <h2>Réparation</h2>
+  <div class="grid">
+    <div><label>Réparer les fiches non identifiées</label><div class="check"><input type="checkbox" id="FixUnmatched"></div></div>
+    <div><label>Réparations max par passage</label><input type="number" id="MaxRepairsPerRun"></div>
+    <div><label>Rafraîchissements max par passage</label><input type="number" id="MaxRefreshesPerRun"></div>
+    <div><label>Entrées de journal conservées</label><input type="number" id="KeepEntries"></div>
+  </div>
+  <h2>Musique en ligne</h2>
+  <div class="grid">
+    <div><label>Dossier de téléchargement (dans la bibliothèque musique)</label><input type="text" id="YtMusicFolder"></div>
+  </div>
+  <h2>Comptes liés (Deezer / Spotify)</h2>
+  <div class="grid">
+    <div><label>Redirect URI (identique dans l'app du fournisseur)</label><input type="text" id="SyncRedirectUri"></div>
+    <div><label>Deezer — App ID</label><input type="text" id="DeezerAppId"></div>
+    <div><label>Deezer — Secret</label><input type="password" id="DeezerAppSecret"></div>
+    <div><label>Spotify — Client ID</label><input type="text" id="SpotifyClientId"></div>
+    <div><label>Spotify — Client Secret</label><input type="password" id="SpotifyClientSecret"></div>
+  </div>
+  <h2>Divers</h2>
+  <div class="grid">
+    <div><label>Ajouter un lien tableau de bord dans le client web</label><div class="check"><input type="checkbox" id="InjectWebDashboard"></div></div>
+  </div>
+  <div class="actions">
+    <button type="submit">Enregistrer</button>
+    <button type="button" class="secondary" id="reload">Recharger</button>
+    <span id="msg"></span>
+  </div>
+</form>
+<script>
+function token() {
+  try {
+    if (window.ApiClient && typeof window.ApiClient.accessToken === 'function') return window.ApiClient.accessToken();
+    if (window.parent && window.parent.ApiClient && typeof window.parent.ApiClient.accessToken === 'function') return window.parent.ApiClient.accessToken();
+  } catch (e) {}
+  try {
+    var raw = localStorage.getItem('jellyfin_credentials');
+    if (raw) { var c = JSON.parse(raw); if (c && c.AccessToken) return c.AccessToken; }
+  } catch (e) {}
+  var m = /[?&](api_key|apiKey|token)=([^&]+)/.exec(location.search);
+  if (m) return decodeURIComponent(m[2]);
+  return localStorage.getItem('nflix_butler_key') || '';
+}
+async function api(path, method, body) {
+  var t = token();
+  if (!t) throw new Error('Ouvre cette page depuis Jellyfin (connecté) ou colle une clé API.');
+  var res = await fetch('/Plugins/NflixButler/' + path, {
+    method: method || 'GET',
+    headers: { 'X-Emby-Token': t, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
+  return res.json();
+}
+function setArr(id, v) { document.getElementById(id).value = Array.isArray(v) ? v.join(', ') : (v || ''); }
+function getArr(id) { return document.getElementById(id).value.split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
+async function load() {
+  document.getElementById('err').textContent = '';
+  try {
+    var c = await api('api/settings');
+    for (var k in c) {
+      var el = document.getElementById(k);
+      if (!el) continue;
+      if (el.type === 'checkbox') el.checked = !!c[k];
+      else if (Array.isArray(c[k])) el.value = c[k].join(', ');
+      else el.value = c[k] == null ? '' : c[k];
+    }
+  } catch (e) { document.getElementById('err').textContent = e.message; }
+}
+document.getElementById('f').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  document.getElementById('msg').textContent = '';
+  document.getElementById('err').textContent = '';
+  try {
+    var c = await api('api/settings');
+    for (var k in c) {
+      var el = document.getElementById(k);
+      if (!el) continue;
+      if (el.type === 'checkbox') c[k] = el.checked;
+      else if (Array.isArray(c[k])) c[k] = getArr(k);
+      else if (el.type === 'number') c[k] = parseInt(el.value || '0', 10);
+      else c[k] = el.value;
+    }
+    await api('api/settings', 'POST', c);
+    document.getElementById('msg').textContent = 'Enregistré.';
+  } catch (e) { document.getElementById('err').textContent = e.message; }
+});
+document.getElementById('reload').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>
