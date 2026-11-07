@@ -5,11 +5,13 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.NflixButler.Services;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Querying;
+using MediaBrowser.Controller.Providers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -221,6 +223,82 @@ public class YtMusicController : ControllerBase
             StreamGate.Release();
         }
     }
+
+    /// <summary>
+    /// Personalized feed: artists from the user's recent Jellyfin plays and recent online listens,
+    /// each expanded into a top-tracks section. Cached 15 min in memory.
+    /// </summary>
+    [HttpGet("feed")]
+    public async Task<IActionResult> Feed(CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        if (FeedCache.At != default && now - FeedCache.At < TimeSpan.FromMinutes(15) && FeedCache.Value != null)
+            return Ok(FeedCache.Value);
+
+        try
+        {
+            // 1. Artists the user actually listens to (Jellyfin play history, audio only).
+            var playedArtists = new List<string>();
+            try
+            {
+                var query = new InternalItemsQuery
+                {
+                    Recursive = true,
+                    IncludeItemTypes = new[] { BaseItemKind.Audio },
+                    IsPlayed = true,
+                    Limit = 200,
+                };
+                foreach (var item in _library.GetItemList(query))
+                {
+                    if (item is MediaBrowser.Controller.Entities.Audio.Audio audio)
+                        playedArtists.AddRange(audio.Artists ?? Array.Empty<string>());
+                }
+            }
+            catch (Exception error) { _logger.LogWarning(error, "feed: play history unavailable"); }
+
+            // 2. Artists from recent online listens (persistent cache).
+            var recentItems = _yt.Store.Items(_yt.Store.Recent(30).Select(r => r.VideoId)).ToList();
+            var recentArtists = recentItems.Where(i => i.Artist.Length > 0).Select(i => FirstArtist(i.Artist)).ToList();
+
+            var artists = playedArtists.Concat(recentArtists)
+                .Select(a => a.Trim()).Where(a => a.Length > 1)
+                .GroupBy(a => a.ToLowerInvariant()).OrderByDescending(g => g.Count())
+                .Select(g => g.First()).Take(4).ToList();
+
+            var sections = new List<object>();
+            foreach (var artist in artists)
+            {
+                var hits = (await _yt.SearchAsync(artist, 8, ct)).Where(h => h.Kind == "track").ToList();
+                if (hits.Count == 0) continue;
+                sections.Add(new
+                {
+                    title = artist,
+                    subtitle = "Parce que vous l'écoutez",
+                    tracks = hits.Select(HitJson),
+                });
+            }
+            if (recentItems.Count > 0)
+            {
+                sections.Insert(0, new
+                {
+                    title = "Écoutés récemment",
+                    subtitle = "Repris là où vous vous êtes arrêté",
+                    tracks = recentItems.Select(ItemJson),
+                });
+            }
+            var payload = new { sections };
+            FeedCache = (now, payload);
+            return Ok(payload);
+        }
+        catch (Exception error)
+        {
+            return StatusCode(502, new { message = error.Message });
+        }
+    }
+
+    private static (DateTime At, object? Value) FeedCache;
+
+    private static string FirstArtist(string artist) => artist.Split(',')[0].Split(" feat")[0].Trim();
 
     public sealed class DownloadRequest
     {
