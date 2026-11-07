@@ -19,6 +19,11 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         serviceCollection.AddSingleton<ButlerEngine>();
         serviceCollection.AddHostedService<ButlerHostedService>();
+        serviceCollection.AddSingleton(provider =>
+        {
+            var paths = provider.GetRequiredService<IApplicationPaths>();
+            return new YtStore(System.IO.Path.Combine(paths.PluginConfigurationsPath, "NflixButler"));
+        });
         serviceCollection.AddSingleton<YtMusicService>();
     }
 }

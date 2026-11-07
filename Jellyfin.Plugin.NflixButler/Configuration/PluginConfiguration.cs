@@ -56,6 +56,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Add a dashboard link to the Jellyfin web client at startup.</summary>
     public bool InjectWebDashboard { get; set; } = true;
 
+    /// <summary>Folder where YouTube Music downloads land (inside the music library, refreshed after each download).</summary>
+    public string YtMusicFolder { get; set; } = "/media/plex/Musiques/YouTube";
+
     /// <summary>Video containers the butler reacts to.</summary>
     public string[] VideoExtensions { get; set; } =
     {
