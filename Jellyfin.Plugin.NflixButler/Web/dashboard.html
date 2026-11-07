@@ -216,7 +216,9 @@
       const message = document.getElementById('entries-message');
       message.textContent = entries.length ? `Affichage de ${entries.length} entrées` : '';
 
-      entries.forEach(entry => {
+      entries.forEach(raw => {
+        const entry = {};
+        for (const k of Object.keys(raw)) entry[k[0].toLowerCase() + k.slice(1)] = raw[k];
         const tr = document.createElement('tr');
         const time = entry.atUtc ? new Date(entry.atUtc).toLocaleTimeString('fr-FR') : '';
         const season = String(entry.season || 0).padStart(2, '0');

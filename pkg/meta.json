@@ -8,7 +8,7 @@
   "status": "Active",
   "autoUpdate": false,
   "targetAbi": "12.4.0.0",
-  "version": "0.1.6.0",
+  "version": "0.1.7.0",
   "changelog": "Bêta. Ne déplace ni ne renomme aucun fichier. Détecte les nouveautés, relit uniquement le dossier concerné, complète les fiches sans identifiant, sans image ou sans résumé, avec temporisation de 6 h pour ne jamais boucler. Diagnostic de la bibliothèque au démarrage. Routes réservées aux administrateurs. Page d’administration réparée : jeton récupéré depuis le client web et page ouverte dans sa propre fenêtre.",
-  "timestamp": "2026-11-07T13:00:00.0000000Z"
+  "timestamp": "2026-11-07T17:30:00.0000000Z"
 }
