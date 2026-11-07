@@ -138,15 +138,20 @@ public class YtMusicController : ControllerBase
         return Ok(new { items = _yt.Store.Items(recents.Select(r => r.VideoId)).Select(ItemJson) });
     }
 
-    /// <summary>Top tracks of an artist channel.</summary>
+    /// <summary>Artist page: top tracks for an artist name (YT Music search, ranked).</summary>
     [HttpGet("artist")]
-    public async Task<IActionResult> Artist([FromQuery] string channelId, [FromQuery] int limit = 30, CancellationToken ct = default)
+    public async Task<IActionResult> Artist([FromQuery] string name, [FromQuery] int limit = 30, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(channelId)) return BadRequest(new { message = "channelId requis" });
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "name requis" });
         try
         {
-            var hits = await _yt.ArtistAsync(channelId, limit, ct);
-            return Ok(new { results = hits.Select(HitJson) });
+            var hits = await _yt.SearchAsync(name, limit, ct);
+            return Ok(new
+            {
+                results = hits.Where(h => h.Kind == "track").Select(HitJson),
+                albums = hits.Where(h => h.Kind == "album").Select(HitJson),
+                artists = hits.Where(h => h.Kind == "artist").Select(HitJson),
+            });
         }
         catch (Exception error)
         {
