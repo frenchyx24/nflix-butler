@@ -45,7 +45,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         new PluginPageInfo
         {
             Name = "nflixbutler",
-            EmbeddedResourcePath = "Jellyfin.Plugin.NflixButler.Web.dashboard.html",
+            EmbeddedResourcePath = "Jellyfin.Plugin.NflixButler.Web.page.html",
         },
     };
 }

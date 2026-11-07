@@ -113,10 +113,6 @@
         <input type="number" id="pollSeconds" min="10">
       </div>
       <div class="form-group">
-        <label for="autoOrganize">Organiser automatiquement</label>
-        <input type="checkbox" id="autoOrganize">
-      </div>
-      <div class="form-group">
         <label for="fixUnmatched">Réparer les non identifiés</label>
         <input type="checkbox" id="fixUnmatched">
       </div>
@@ -162,12 +158,26 @@
   </div>
 
   <script>
+    // The token lives in the web client's ApiClient. Read it from there first: the page is also
+    // embedded inside Jellyfin (iframe, same origin), so the parent window holds it.
     function token() {
+      const fromClient = (client) => {
+        try {
+          return (client && typeof client.accessToken === 'function' && client.accessToken()) || '';
+        } catch (e) { return ''; }
+      };
+      let value = fromClient(window.ApiClient);
+      if (!value) {
+        try { value = fromClient(window.parent && window.parent.ApiClient); } catch (e) { value = ''; }
+      }
+      if (value) return value;
       try {
-        const raw = localStorage.getItem('jellyfin_credentials');
-        const data = JSON.parse(raw || '{}');
-        return (data.Servers && data.Servers[0] && data.Servers[0].AccessToken) || localStorage.getItem('nflix_butler_key') || '';
-      } catch (e) { return ''; }
+        const data = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}');
+        const server = (data.Servers || [])[0] || {};
+        if (server.AccessToken) return server.AccessToken;
+      } catch (e) { /* ignore */ }
+      const query = new URLSearchParams(location.search);
+      return query.get('api_key') || query.get('apiKey') || query.get('token') || localStorage.getItem('nflix_butler_key') || '';
     }
 
     async function api(path, options) {
@@ -208,16 +218,19 @@
 
       entries.forEach(entry => {
         const tr = document.createElement('tr');
-        const time = new Date(entry.atUtc).toLocaleTimeString('fr-FR');
-        const title = entry.kind === 'episode' ? `${entry.title} S${entry.season.toString().padStart(2, '0')}E${entry.episode.toString().padStart(2, '0')}` : entry.title;
-        const statusClass = entry.status === 'ok' ? 'ok' : entry.status === 'pending' ? 'pending' : entry.status === 'needs-review' ? 'needs-review' : 'failed';
+        const time = entry.atUtc ? new Date(entry.atUtc).toLocaleTimeString('fr-FR') : '';
+        const season = String(entry.season || 0).padStart(2, '0');
+        const episode = String(entry.episode || 0).padStart(2, '0');
+        const title = entry.kind === 'episode' ? `${entry.title || ''} S${season}E${episode}` : (entry.title || '');
+        const status = entry.status || 'pending';
+        const statusClass = status === 'ok' ? 'ok' : status === 'pending' ? 'pending' : status === 'needs-review' ? 'needs-review' : 'failed';
 
         tr.innerHTML = `
           <td>${time}</td>
           <td>${title}</td>
-          <td>${entry.library}</td>
-          <td>${entry.action}</td>
-          <td><span class="pill ${statusClass}">${entry.status}</span></td>
+          <td>${entry.library || ''}</td>
+          <td>${entry.action || ''}</td>
+          <td><span class="pill ${statusClass}">${status}</span></td>
         `;
         if (entry.itemId) {
           const td = document.createElement('td');
@@ -240,9 +253,9 @@
         div.className = 'unmatched-item';
         div.innerHTML = `
           <div>
-            <p>${item.name}</p>
-            <p class="type">${item.type}</p>
-            <p class="path">${item.path}</p>
+            <p>${item.name || ''}</p>
+            <p class="type">${item.type || ''}${item.year ? ' · ' + item.year : ''}</p>
+            <p class="path">${item.path || ''}</p>
           </div>
           <div style="display: flex; gap: 0.5rem; align-items: center;">
             <button data-id="${item.itemId}" class="fix">Réparer</button>
@@ -333,15 +346,14 @@
         const settings = await api('/settings');
         document.getElementById('enabled').checked = settings.enabled;
         document.getElementById('pollSeconds').value = settings.pollSeconds;
-        document.getElementById('autoOrganize').checked = settings.autoOrganize;
         document.getElementById('fixUnmatched').checked = settings.fixUnmatched;
         document.getElementById('maxRepairsPerRun').value = settings.maxRepairsPerRun;
         document.getElementById('minFileSizeMb').value = settings.minFileSizeMb;
         document.getElementById('movieLibrary').value = settings.movieLibrary;
         document.getElementById('seriesLibrary').value = settings.seriesLibrary;
         document.getElementById('animeLibrary').value = settings.animeLibrary;
-        document.getElementById('extraRoots').value = settings.extraRoots.join(', ');
-        document.getElementById('animeKeywords').value = settings.animeKeywords.join(', ');
+        document.getElementById('extraRoots').value = (settings.extraRoots || []).join(', ');
+        document.getElementById('animeKeywords').value = (settings.animeKeywords || []).join(', ');
       } catch (e) {
         showError(e.message);
       }
@@ -351,7 +363,6 @@
       const settings = {
         enabled: document.getElementById('enabled').checked,
         pollSeconds: parseInt(document.getElementById('pollSeconds').value),
-        autoOrganize: document.getElementById('autoOrganize').checked,
         fixUnmatched: document.getElementById('fixUnmatched').checked,
         maxRepairsPerRun: parseInt(document.getElementById('maxRepairsPerRun').value),
         minFileSizeMb: parseInt(document.getElementById('minFileSizeMb').value),
@@ -408,18 +419,21 @@
 
     async function load() {
       if (!token()) {
-        showError('Ouvrez cette page depuis Jellyfin ou collez une clé API dans le champ ci-dessous.');
-        const input = document.createElement('input');
-        input.type = 'password';
-        input.placeholder = 'Clé API Jellyfin';
-        input.style.marginTop = '1rem';
-        input.style.width = '100%';
-        input.onchange = () => {
-          localStorage.setItem('nflix_butler_key', input.value);
-          hideError();
-          load();
-        };
-        document.getElementById('error-message').appendChild(input);
+        showError('Ouvrez cette page depuis Jellyfin (Tableau de bord puis Plugins) ou collez une clé API dans le champ ci-dessous.');
+        if (!document.getElementById('butler-key')) {
+          const input = document.createElement('input');
+          input.id = 'butler-key';
+          input.type = 'password';
+          input.placeholder = 'Clé API Jellyfin';
+          input.style.marginTop = '1rem';
+          input.style.width = '100%';
+          input.onchange = () => {
+            localStorage.setItem('nflix_butler_key', input.value);
+            hideError();
+            load();
+          };
+          document.getElementById('error-message').appendChild(input);
+        }
         return;
       }
 
@@ -436,8 +450,10 @@
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
           load();
+          if (!interval) interval = setInterval(load, 10000);
         } else {
           clearInterval(interval);
+          interval = null;
         }
       });
     }

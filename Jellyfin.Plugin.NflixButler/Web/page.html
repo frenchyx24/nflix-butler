@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nflix Butler</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #0b0b10; }
+    iframe { display: block; width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <!-- Jellyfin injects plugin pages inside the web client. The dashboard needs its own document
+       (inline scripts do not run when a page is inserted as a fragment), so this wrapper hosts it
+       in a same-origin frame; the frame reads the token from the parent ApiClient. -->
+  <iframe src="/Plugins/NflixButler/web/dashboard" title="Nflix Butler" allow="clipboard-write"></iframe>
+</body>
+</html>

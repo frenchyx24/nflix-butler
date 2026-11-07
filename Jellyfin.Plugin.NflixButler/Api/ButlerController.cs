@@ -34,11 +34,6 @@ public class ButlerController : ControllerBase
     [HttpGet("web/dashboard")]
     public IActionResult Dashboard() => Content(Resource("dashboard.html"), "text/html; charset=utf-8");
 
-    /// <summary>The sidebar injector loaded by the web client.</summary>
-    [AllowAnonymous]
-    [HttpGet("web/nav.js")]
-    public IActionResult NavScript() => Content(Resource("nav.js"), "application/javascript; charset=utf-8");
-
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/status")]
     public IActionResult Status()
