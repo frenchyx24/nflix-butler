@@ -173,8 +173,10 @@
       if (value) return value;
       try {
         const data = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}');
-        const server = (data.Servers || [])[0] || {};
-        if (server.AccessToken) return server.AccessToken;
+        if (data.AccessToken) return data.AccessToken;
+        const servers = data.Servers || [];
+        const withToken = servers.find(s => s && s.AccessToken) || servers[0];
+        if (withToken && withToken.AccessToken) return withToken.AccessToken;
       } catch (e) { /* ignore */ }
       const query = new URLSearchParams(location.search);
       return query.get('api_key') || query.get('apiKey') || query.get('token') || localStorage.getItem('nflix_butler_key') || '';

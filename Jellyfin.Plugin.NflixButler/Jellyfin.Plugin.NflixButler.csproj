@@ -7,7 +7,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>Jellyfin.Plugin.NflixButler</AssemblyName>
     <RootNamespace>Jellyfin.Plugin.NflixButler</RootNamespace>
-    <Version>0.4.0.2</Version>
+    <Version>0.4.0.3</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
