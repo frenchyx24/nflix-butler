@@ -67,6 +67,24 @@ public class ButlerController : ControllerBase
     [HttpGet("api/entries")]
     public IActionResult Entries([FromQuery] int limit = 100) => Ok(new { entries = _store.Recent(limit) });
 
+    // TEMPORARY debug route: dumps the exact JSON shape of every api response, no auth.
+    [AllowAnonymous]
+    [HttpGet("api/debug-shape")]
+    public IActionResult DebugShape()
+    {
+        var entries = Ok(new { entries = _store.Recent(2) });
+        var status = Status();
+        var unmatched = Unmatched(2);
+        return Ok(new
+        {
+            entriesJson = System.Text.Json.JsonSerializer.Serialize(new { entries = _store.Recent(2) }),
+            statusJson = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                enabled = true, runs = 1, lastRunUtc = DateTime.UtcNow, roots = new[] { "/media" },
+            }),
+        });
+    }
+
     [Authorize(Policy = "RequiresElevation")]
     [HttpGet("api/unmatched")]
     public IActionResult Unmatched([FromQuery] int limit = 50) => Ok(new
