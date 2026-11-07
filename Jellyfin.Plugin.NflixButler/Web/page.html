@@ -89,7 +89,13 @@ function token() {
   } catch (e) {}
   try {
     var raw = localStorage.getItem('jellyfin_credentials');
-    if (raw) { var c = JSON.parse(raw); if (c && c.AccessToken) return c.AccessToken; }
+    if (raw) {
+      var c = JSON.parse(raw);
+      if (c && c.AccessToken) return c.AccessToken;
+      var servers = (c && c.Servers) || [];
+      var withToken = servers.find(function (s2) { return s2 && s2.AccessToken; }) || servers[0];
+      if (withToken && withToken.AccessToken) return withToken.AccessToken;
+    }
   } catch (e) {}
   var m = /[?&](api_key|apiKey|token)=([^&]+)/.exec(location.search);
   if (m) return decodeURIComponent(m[2]);
