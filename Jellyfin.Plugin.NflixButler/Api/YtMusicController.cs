@@ -174,6 +174,28 @@ public class YtMusicController : ControllerBase
         }
     }
 
+    /**
+     * Which of these tracks already sit in the music library. One call per list, so every row can
+     * show its state without asking for the full metadata of each track.
+     */
+    [HttpGet("downloaded")]
+    public IActionResult Downloaded([FromQuery] string? ids)
+    {
+        var wanted = (ids ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(id => id.Length is > 0 and <= 32)
+            .Distinct()
+            .Take(200);
+        var present = new List<string>();
+        foreach (var id in wanted)
+        {
+            var item = _yt.Store.Item(id);
+            if (item != null && item.DownloadedPath.Length > 0 && System.IO.File.Exists(item.DownloadedPath))
+                present.Add(id);
+        }
+        return Ok(new { ids = present });
+    }
+
     /// <summary>Proxies the audio stream of one video; Range forwarded so the player can seek.</summary>
     [HttpGet("stream")]
     public async Task<IActionResult> Stream([FromQuery] string videoId, CancellationToken ct)
@@ -343,7 +365,16 @@ public class YtMusicController : ControllerBase
         if (string.IsNullOrWhiteSpace(folder))
             return StatusCode(412, new { message = "Aucun dossier musique configuré (YtMusicFolder)." });
 
-        var item = await _yt.InfoAsync(request.VideoId, ct);
+        YtItem item;
+        try
+        {
+            item = await _yt.InfoAsync(request.VideoId, ct);
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning("YT download metadata failed for {VideoId}: {Message}", request.VideoId, error.Message);
+            return StatusCode(502, new { message = "Métadonnées introuvables : " + error.Message });
+        }
         if (item.DownloadedPath.Length > 0 && System.IO.File.Exists(item.DownloadedPath))
         {
             _yt.Touch(request.VideoId);
@@ -358,28 +389,41 @@ public class YtMusicController : ControllerBase
 
         // Plain m4a download, no ffmpeg post-processing (the container has none): the artist
         // folder + clean file name carry the metadata for Jellyfin's own scanner.
-        var stdout = await YtMusicServiceRun(list =>
+        string stdout;
+        try
         {
-            list.Add("-q");
-            list.Add("--no-warnings");
-            list.Add("-f");
-            list.Add("bestaudio[ext=m4a]/bestaudio");
-            list.Add("-o");
-            list.Add(outTemplate);
-            list.Add("--no-playlist");
-            list.Add("--print");
-            list.Add("after_move:filepath");
-            list.Add("https://www.youtube.com/watch?v=" + request.VideoId);
-        }, ct);
+            stdout = await YtMusicServiceRun(list =>
+            {
+                list.Add("-q");
+                list.Add("--no-warnings");
+                list.Add("-f");
+                list.Add("bestaudio[ext=m4a]/bestaudio");
+                list.Add("-o");
+                list.Add(outTemplate);
+                list.Add("--no-playlist");
+                list.Add("--print");
+                list.Add("after_move:filepath");
+                list.Add("https://www.youtube.com/watch?v=" + request.VideoId);
+            }, ct);
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning("YT download failed for {VideoId}: {Message}", request.VideoId, error.Message);
+            return StatusCode(502, new { message = error.Message });
+        }
         // yt-dlp prints the exact final path; never guess with "newest file in the folder".
         var file = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(l => l.Trim())
             .LastOrDefault(l => l.Length > 0);
         if (string.IsNullOrEmpty(file) || !System.IO.File.Exists(file))
         {
-            file = Directory.GetFiles(targetDir, "*.m4a")
-                .OrderByDescending(System.IO.File.GetLastWriteTimeUtc)
-                .FirstOrDefault();
+            // Already downloaded once: yt-dlp skips the write and prints nothing.
+            var expected = Path.Combine(targetDir, safeTitle + ".m4a");
+            file = System.IO.File.Exists(expected)
+                ? expected
+                : Directory.GetFiles(targetDir, "*.m4a")
+                    .OrderByDescending(System.IO.File.GetLastWriteTimeUtc)
+                    .FirstOrDefault();
         }
         if (string.IsNullOrEmpty(file))
             return StatusCode(502, new { message = "Téléchargement terminé mais aucun .m4a trouvé." });

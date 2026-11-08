@@ -8,7 +8,7 @@
   "status": "Active",
   "autoUpdate": false,
   "targetAbi": "12.4.0.0",
-  "version": "0.4.1.1",
-  "changelog": "Bêta. Ne déplace ni ne renomme aucun fichier. Détecte les nouveautés, relit uniquement le dossier concerné, complète les fiches sans identifiant, sans image ou sans résumé, avec temporisation de 6 h pour ne jamais boucler. Diagnostic de la bibliothèque au démarrage. Routes réservées aux administrateurs. Comptes Deezer/Spotify durcis : import en POST, jetons Spotify rafraîchis automatiquement, jeton Deezer longue durée, correspondance artiste+titre insensible aux accents. Lecture audio : en-têtes de plage et type réels. Téléchargement : chemin exact du fichier. Fil « Pour toi » personnalisé par utilisateur. Page d’administration dans sa propre fenêtre.",
-  "timestamp": "2026-11-08T12:50:00.0000000Z"
+  "version": "0.4.1.2",
+  "changelog": "Bêta. Ne déplace ni ne renomme aucun fichier. Détecte les nouveautés, relit uniquement le dossier concerné, complète les fiches sans identifiant, sans image ou sans résumé, avec temporisation de 6 h pour ne jamais boucler. Diagnostic de la bibliothèque au démarrage. Routes réservées aux administrateurs. Comptes Deezer/Spotify durcis : import en POST, jetons Spotify rafraîchis automatiquement, jeton Deezer longue durée, correspondance artiste+titre insensible aux accents. Lecture audio : en-têtes de plage et type réels. Téléchargement : chemin exact du fichier, reprise d’un fichier déjà présent, état « déjà téléchargé » en une requête. Fil « Pour toi » personnalisé par utilisateur. Page d’administration dans sa propre fenêtre.",
+  "timestamp": "2026-11-08T14:30:00.0000000Z"
 }
