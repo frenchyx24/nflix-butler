@@ -123,6 +123,14 @@ public sealed class YtMusicService
         _store.RecordSearch(query, normalized, ids);
         foreach (var hit in parsed.Where(h => h.Kind == "track"))
         {
+            // Never overwrite what /info or a download already stored (album, path, artist).
+            var known = _store.Item(hit.VideoId);
+            if (known != null)
+            {
+                if (hit.Subtitle.Length == 0) hit.Subtitle = known.Artist;
+                if (known.Artist.Length == 0 && hit.Subtitle.Length > 0) { known.Artist = hit.Subtitle; _store.PutItem(known); }
+                continue;
+            }
             _store.PutItem(new YtItem
             {
                 VideoId = hit.VideoId,
