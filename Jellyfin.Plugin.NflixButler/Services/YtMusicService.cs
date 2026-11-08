@@ -152,6 +152,16 @@ public sealed class YtMusicService
         var hits = new List<YtHit>();
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("entries", out var entries)) return hits;
+        static string Text(JsonElement entry, params string[] names)
+        {
+            foreach (var name in names)
+                if (entry.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String)
+                {
+                    var value = el.GetString() ?? "";
+                    if (value.Length > 0) return value;
+                }
+            return "";
+        }
         foreach (var entry in entries.EnumerateArray())
         {
             var ieKey = entry.TryGetProperty("ie_key", out var ie) ? ie.GetString() : "";
@@ -160,7 +170,10 @@ public sealed class YtMusicService
             var id = entry.TryGetProperty("id", out var i) ? i.GetString() ?? "" : "";
             if (ieKey == "Youtube" && !string.IsNullOrEmpty(id) && id.Length <= 32)
             {
-                hits.Add(new YtHit { Kind = "track", VideoId = id, Title = title, Subtitle = "" });
+                // yt-dlp exposes the artist/channel on flat entries: without it search results
+                // would show "Musique" instead of the artist name.
+                var subtitle = Text(entry, "channel", "uploader", "artist", "creator").Replace(" - Topic", "");
+                hits.Add(new YtHit { Kind = "track", VideoId = id, Title = title, Subtitle = subtitle });
             }
             else if (ieKey == "YoutubeTab" && url.Contains("/browse/"))
             {
@@ -203,20 +216,40 @@ public sealed class YtMusicService
         var item = new YtItem
         {
             VideoId = videoId,
-            Title = Get("title"),
-            Artist = Get("artist", "creator", "channel"),
+            Title = Get("track") is { Length: > 0 } trackTitle ? trackTitle : Get("title"),
+            Artist = Get("artist", "album_artist", "creator", "uploader"),
             Album = Get("album"),
             ChannelId = Get("channel_id"),
             ChannelTitle = Get("channel", "uploader"),
             Duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetInt32() : 0,
-            Thumbnail = "https://i.ytimg.com/vi/" + videoId + "/maxresdefault.jpg",
+            Thumbnail = Get("thumbnail"),
         };
+        if (root.TryGetProperty("artists", out var artists) && artists.ValueKind == JsonValueKind.Array)
+        {
+            var first = artists.EnumerateArray().FirstOrDefault();
+            if (first.ValueKind == JsonValueKind.String && (first.GetString() ?? "").Length > 0)
+                item.Artist = first.GetString()!;
+        }
+        if (item.Thumbnail.Length == 0)
+            item.Thumbnail = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
         if (cached != null)
         {
             // Keep the search-time fields when the watch page lacks them.
             if (item.Title.Length == 0) item.Title = cached.Title;
             if (item.Artist.Length == 0) item.Artist = cached.Artist;
             item.DownloadedPath = cached.DownloadedPath;
+        }
+        // Album page link is a bonus: resolve it once, never fail the metadata because of it.
+        if (item.AlbumBrowseId.Length == 0 && item.Album.Length > 0)
+        {
+            try
+            {
+                var wanted = YtStore.Normalize(item.Album);
+                var hits = await SearchAsync((item.Artist + " " + item.Album).Trim(), 12, ct).ConfigureAwait(false);
+                var album = hits.FirstOrDefault(h => h.Kind == "album" && YtStore.Normalize(h.Title).Contains(wanted));
+                if (album != null) item.AlbumBrowseId = album.BrowseId;
+            }
+            catch { }
         }
         _store.PutItem(item);
         _store.Save();

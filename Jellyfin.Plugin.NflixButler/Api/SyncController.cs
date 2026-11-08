@@ -44,6 +44,61 @@ public class SyncController : ControllerBase
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
+    /// <summary>Jellyfin user id of the caller, when the auth handler exposes one as a claim.</summary>
+    private string? CallerUserId()
+    {
+        var value = User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(value, out _) ? value : null;
+    }
+
+    /// <summary>
+    /// Guards a userId taken from the body or the query string: a signed-in user may only read or
+    /// change their own linked accounts, never another user's stored streaming tokens.
+    /// </summary>
+    private bool IsOtherUser(string? requested)
+    {
+        var caller = CallerUserId();
+        return caller != null && !string.Equals(caller, requested, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Refreshes a Spotify access token when it is about to expire (one hour lifetime).</summary>
+    private async Task<SyncAccount> FreshAsync(string userId, SyncAccount account, CancellationToken ct)
+    {
+        if (account.Service != "spotify" || account.ExpiresAtUtc > DateTime.UtcNow.AddMinutes(2)) return account;
+        if (string.IsNullOrWhiteSpace(account.RefreshToken)) return account;
+        try
+        {
+            var body = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = account.RefreshToken,
+            });
+            using var req = new HttpRequestMessage(HttpMethod.Post, "https://accounts.spotify.com/api/token") { Content = body };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(Encoding.UTF8.GetBytes(Config.SpotifyClientId + ":" + Config.SpotifyClientSecret)));
+            using var res = await Http.SendAsync(req, ct);
+            var text = await res.Content.ReadAsStringAsync(ct);
+            if (!res.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("sync: Spotify refresh failed {Status} {Body}", (int)res.StatusCode, text);
+                return account;
+            }
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("access_token", out var token)) account.AccessToken = token.GetString() ?? account.AccessToken;
+            if (root.TryGetProperty("refresh_token", out var rotated)) account.RefreshToken = rotated.GetString() ?? account.RefreshToken;
+            account.ExpiresAtUtc = DateTime.UtcNow.AddSeconds(
+                root.TryGetProperty("expires_in", out var expires) && expires.ValueKind == JsonValueKind.Number ? expires.GetInt32() : 3600);
+            _store.Put(userId, account);
+            _store.Save();
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning(error, "sync: Spotify refresh failed");
+        }
+        return account;
+    }
+
     public sealed class LinkRequest
     {
         public string Service { get; set; } = "";
@@ -90,6 +145,8 @@ public class SyncController : ControllerBase
             return BadRequest(new { message = "service doit être deezer ou spotify" });
         if (string.IsNullOrWhiteSpace(request.Code) || string.IsNullOrWhiteSpace(request.UserId))
             return BadRequest(new { message = "code et userId requis" });
+        if (IsOtherUser(request.UserId))
+            return Forbid();
 
         try
         {
@@ -105,15 +162,16 @@ public class SyncController : ControllerBase
                     .Select(p => p.Split('='))
                     .Where(p => p.Length == 2)
                     .ToDictionary(p => p[0], p => p[1]);
-                if (!parts.TryGetValue("access_token", out var token))
+                if (!parts.TryGetValue("access_token", out var token) || string.IsNullOrWhiteSpace(token))
                     return StatusCode(502, new { message = "Deezer a refusé le code : " + tokenText });
-                var expires = parts.TryGetValue("expires", out var exp) && int.TryParse(exp, out var e) ? e : 3600;
+                // With the offline_access permission Deezer returns no "expires": the token does not expire.
+                var expires = parts.TryGetValue("expires", out var exp) && int.TryParse(exp, out var e) ? e : 0;
                 var profile = await DeezerGet("/user", token, ct);
                 account = new SyncAccount
                 {
                     Service = service,
                     AccessToken = token,
-                    ExpiresAtUtc = DateTime.UtcNow.AddSeconds(expires),
+                    ExpiresAtUtc = expires > 0 ? DateTime.UtcNow.AddSeconds(expires) : DateTime.MaxValue,
                     ProfileId = profile.GetProperty("id").GetRawText(),
                     ProfileName = profile.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
                     LinkedAtUtc = DateTime.UtcNow,
@@ -139,7 +197,8 @@ public class SyncController : ControllerBase
                 var root = doc.RootElement;
                 var profileReq = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/me");
                 profileReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", root.GetProperty("access_token").GetString());
-                var profileText = await Http.SendAsync(profileReq, ct).Result.Content.ReadAsStringAsync(ct);
+                using var profileRes = await Http.SendAsync(profileReq, ct);
+                var profileText = await profileRes.Content.ReadAsStringAsync(ct);
                 using var pdoc = JsonDocument.Parse(profileText);
                 account = new SyncAccount
                 {
@@ -165,12 +224,25 @@ public class SyncController : ControllerBase
     }
 
     [HttpGet("status")]
-    public IActionResult Status([FromQuery] string userId) =>
-        Ok(new { accounts = _store.ForUser(userId ?? "").Select(a => new { a.Service, a.ProfileName, a.ProfileId, a.LinkedAtUtc }) });
+    public IActionResult Status([FromQuery] string userId)
+    {
+        if (IsOtherUser(userId)) return Forbid();
+        return Ok(new
+        {
+            accounts = _store.ForUser(userId ?? "").Select(a => new
+            {
+                service = a.Service,
+                profileName = a.ProfileName,
+                profileId = a.ProfileId,
+                linkedAtUtc = a.LinkedAtUtc,
+            }),
+        });
+    }
 
     [HttpDelete("unlink")]
     public IActionResult Unlink([FromQuery] string userId, [FromQuery] string service)
     {
+        if (IsOtherUser(userId)) return Forbid();
         _store.Remove(userId ?? "", service.ToLowerInvariant());
         _store.Save();
         return Ok(new { unlinked = true });
@@ -180,10 +252,12 @@ public class SyncController : ControllerBase
     [HttpGet("playlists")]
     public async Task<IActionResult> Playlists([FromQuery] string service, [FromQuery] string userId, CancellationToken ct)
     {
+        if (IsOtherUser(userId)) return Forbid();
         var account = _store.Get(userId ?? "", service.ToLowerInvariant());
         if (account == null) return StatusCode(412, new { message = "Compte " + service + " non lié." });
         try
         {
+            account = await FreshAsync(userId ?? "", account, ct);
             if (account.Service == "deezer")
             {
                 var doc = await DeezerGet("/user/playlists?limit=100", account.AccessToken, ct);
@@ -197,15 +271,15 @@ public class SyncController : ControllerBase
             }
             else
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/me/playlists?limit=50");
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
-                var text = await (await Http.SendAsync(req, ct)).Content.ReadAsStringAsync(ct);
+                var text = await SpotifyGetAsync(userId ?? "", "/v1/me/playlists?limit=50", account, ct);
                 using var doc = JsonDocument.Parse(text);
-                var items = doc.RootElement.GetProperty("items").EnumerateArray().Select(p => new
+                if (!doc.RootElement.TryGetProperty("items", out var entries))
+                    return StatusCode(502, new { message = "Spotify: " + text });
+                var items = entries.EnumerateArray().Select(p => new
                 {
                     id = p.GetProperty("id").GetString() ?? "",
-                    title = p.GetProperty("name").GetString() ?? "",
-                    tracks = p.GetProperty("tracks").GetProperty("total").GetInt32(),
+                    title = p.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                    tracks = p.TryGetProperty("tracks", out var t) && t.TryGetProperty("total", out var total) && total.ValueKind == JsonValueKind.Number ? total.GetInt32() : 0,
                 }).ToList();
                 return Ok(new { playlists = items });
             }
@@ -224,8 +298,10 @@ public class SyncController : ControllerBase
     [HttpPost("import")]
     public async Task<IActionResult> Import([FromBody] ImportRequest request, CancellationToken ct)
     {
+        if (IsOtherUser(request.UserId)) return Forbid();
         var account = _store.Get(request.UserId ?? "", request.Service.ToLowerInvariant());
         if (account == null) return StatusCode(412, new { message = "Compte non lié." });
+        account = await FreshAsync(request.UserId ?? "", account, ct);
 
         var tracks = new List<TrackRef>();
         try
@@ -242,18 +318,26 @@ public class SyncController : ControllerBase
             }
             else
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/playlists/" + request.PlaylistId + "/tracks?limit=100");
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
-                var text = await (await Http.SendAsync(req, ct)).Content.ReadAsStringAsync(ct);
-                using var doc = JsonDocument.Parse(text);
-                foreach (var item in doc.RootElement.GetProperty("items").EnumerateArray())
+                for (var offset = 0; offset < 500; offset += 100)
                 {
-                    if (!item.TryGetProperty("track", out var t) || t.ValueKind != JsonValueKind.Object) continue;
-                    tracks.Add(new TrackRef
+                    var text = await SpotifyGetAsync(request.UserId ?? "",
+                        "/v1/playlists/" + request.PlaylistId + "/tracks?limit=100&offset=" + offset, account, ct);
+                    using var doc = JsonDocument.Parse(text);
+                    if (!doc.RootElement.TryGetProperty("items", out var items)) break;
+                    foreach (var item in items.EnumerateArray())
                     {
-                        Title = t.GetProperty("name").GetString() ?? "",
-                        Artist = t.GetProperty("artists").EnumerateArray().FirstOrDefault().GetProperty("name").GetString() ?? "",
-                    });
+                        if (!item.TryGetProperty("track", out var t) || t.ValueKind != JsonValueKind.Object) continue;
+                        var title = t.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                        var artist = "";
+                        if (t.TryGetProperty("artists", out var artists) && artists.ValueKind == JsonValueKind.Array)
+                        {
+                            var first = artists.EnumerateArray().FirstOrDefault();
+                            if (first.ValueKind == JsonValueKind.Object && first.TryGetProperty("name", out var an))
+                                artist = an.GetString() ?? "";
+                        }
+                        if (title.Length > 0) tracks.Add(new TrackRef { Title = title, Artist = artist });
+                    }
+                    if (items.GetArrayLength() < 100) break;
                 }
             }
         }
@@ -275,30 +359,55 @@ public class SyncController : ControllerBase
         return Ok(new { total = tracks.Count, matched, missing });
     }
 
-    /// <summary>Matches one track against the local library: Jellyfin search "artist title", best normalized-title hit wins.</summary>
+    /// <summary>
+    /// Matches one track against the local library: Jellyfin search "artist title", then a title-only
+    /// fallback. Best normalized title hit wins, with the artist as a tie-breaker.
+    /// </summary>
     private MediaBrowser.Controller.Entities.BaseItem? MatchLocal(string title, string artist)
     {
+        var wanted = Normalize(title);
+        if (wanted.Length < 2) return null;
+        var wantedArtist = Normalize(artist);
         try
         {
-            var wanted = Normalize(title);
-            if (wanted.Length < 2) return null;
-            var query = new InternalItemsQuery
+            var candidates = SearchCandidates(artist + " " + title);
+            if (candidates.Count == 0) candidates = SearchCandidates(title);
+            MediaBrowser.Controller.Entities.BaseItem? best = null;
+            var bestScore = 0.0;
+            foreach (var candidate in candidates)
             {
-                Recursive = true,
-                IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.Audio },
-                SearchTerm = artist + " " + title,
-                Limit = 8,
-            };
-            var candidates = _library.GetItemList(query);
-            return candidates
-                .OrderByDescending(c => Score(Normalize(c.Name), wanted))
-                .FirstOrDefault(c => Score(Normalize(c.Name), wanted) >= 0.6);
+                var titleScore = Score(Normalize(candidate.Name), wanted);
+                if (titleScore < 0.6) continue;
+                var artistScore = 0.0;
+                if (candidate is MediaBrowser.Controller.Entities.Audio.Audio audio && wantedArtist.Length > 0)
+                {
+                    artistScore = (audio.Artists ?? Array.Empty<string>())
+                        .Select(a => Score(Normalize(a), wantedArtist))
+                        .DefaultIfEmpty(0)
+                        .Max();
+                }
+                var total = titleScore + (artistScore * 0.5);
+                if (total > bestScore) { bestScore = total; best = candidate; }
+            }
+            return best;
         }
         catch (Exception error)
         {
             _logger.LogWarning(error, "sync: match local failed for {Title}", title);
             return null;
         }
+    }
+
+    private List<MediaBrowser.Controller.Entities.BaseItem> SearchCandidates(string term)
+    {
+        var query = new InternalItemsQuery
+        {
+            Recursive = true,
+            IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.Audio },
+            SearchTerm = term,
+            Limit = 12,
+        };
+        return _library.GetItemList(query).ToList();
     }
 
     private static double Score(string candidate, string wanted)
@@ -311,12 +420,32 @@ public class SyncController : ControllerBase
         return ww.Length == 0 ? 0 : (double)common / ww.Length;
     }
 
+    /// <summary>Lowercase, accent-folded, punctuation-free form used for every comparison.</summary>
     internal static string Normalize(string value)
     {
-        var sb = new StringBuilder(value.ToLowerInvariant().Length);
-        foreach (var c in value.ToLowerInvariant())
-            if (char.IsLetterOrDigit(c) || c == ' ') sb.Append(c);
-        return string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (string.IsNullOrEmpty(value)) return "";
+        var sb = new StringBuilder(value.Length);
+        foreach (var raw in value.ToLowerInvariant())
+        {
+            var c = raw switch
+            {
+                'à' or 'á' or 'â' or 'ä' or 'ã' or 'å' => 'a',
+                'ç' => 'c',
+                'è' or 'é' or 'ê' or 'ë' => 'e',
+                'ì' or 'í' or 'î' or 'ï' => 'i',
+                'ñ' => 'n',
+                'ò' or 'ó' or 'ô' or 'ö' or 'õ' => 'o',
+                'ù' or 'ú' or 'û' or 'ü' => 'u',
+                'ý' or 'ÿ' => 'y',
+                'œ' => 'o',
+                'æ' => 'a',
+                'ß' => 's',
+                _ => char.IsLetterOrDigit(raw) ? raw : ' ',
+            };
+            if (c == ' ' && (sb.Length == 0 || sb[^1] == ' ')) continue;
+            sb.Append(c);
+        }
+        return sb.ToString().Trim();
     }
 
     /// <summary>Public Deezer search (no token needed): used to map a local track to a Deezer song id for export.</summary>
@@ -324,15 +453,23 @@ public class SyncController : ControllerBase
     public async Task<IActionResult> DeezerSearch([FromQuery] string q, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(q)) return Ok(new { tracks = Array.Empty<object>() });
-        var json = await Http.GetStringAsync("https://api.deezer.com/search?q=" + Uri.EscapeDataString(q) + "&limit=5", ct);
-        using var doc = JsonDocument.Parse(json);
-        var tracks = doc.RootElement.GetProperty("data").EnumerateArray().Select(t => new
+        try
         {
-            id = t.GetProperty("id").GetRawText(),
-            title = t.GetProperty("title").GetString() ?? "",
-            artist = t.GetProperty("artist").GetProperty("name").GetString() ?? "",
-        }).ToList();
-        return Ok(new { tracks });
+            var json = await Http.GetStringAsync("https://api.deezer.com/search?q=" + Uri.EscapeDataString(q) + "&limit=5", ct);
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) return Ok(new { tracks = Array.Empty<object>() });
+            var tracks = data.EnumerateArray().Select(t => new
+            {
+                id = t.GetProperty("id").GetRawText(),
+                title = t.GetProperty("title").GetString() ?? "",
+                artist = t.GetProperty("artist").GetProperty("name").GetString() ?? "",
+            }).ToList();
+            return Ok(new { tracks });
+        }
+        catch (Exception error)
+        {
+            return StatusCode(502, new { message = error.Message });
+        }
     }
 
     /**
@@ -343,6 +480,7 @@ public class SyncController : ControllerBase
     [HttpPost("export-deezer")]
     public async Task<IActionResult> ExportDeezer([FromBody] ExportRequest request, CancellationToken ct)
     {
+        if (IsOtherUser(request.UserId)) return Forbid();
         var account = _store.Get(request.UserId ?? "", "deezer");
         if (account == null) return StatusCode(412, new { message = "Compte Deezer non lié." });
 
@@ -372,6 +510,21 @@ public class SyncController : ControllerBase
         catch (Exception error)
         {
             return StatusCode(502, new { message = error.Message });
+        }
+    }
+
+    /// <summary>GET on the Spotify Web API, refreshing the token once on a 401 (expired access token).</summary>
+    private async Task<string> SpotifyGetAsync(string userId, string path, SyncAccount account, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com" + path);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
+            using var res = await Http.SendAsync(req, ct);
+            var text = await res.Content.ReadAsStringAsync(ct);
+            if (res.StatusCode != System.Net.HttpStatusCode.Unauthorized || attempt > 0) return text;
+            account.ExpiresAtUtc = DateTime.MinValue;
+            await FreshAsync(userId, account, ct);
         }
     }
 

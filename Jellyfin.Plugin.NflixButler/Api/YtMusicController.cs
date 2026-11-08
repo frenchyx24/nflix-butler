@@ -43,14 +43,16 @@ public class YtMusicController : ControllerBase
     private readonly IProviderManager _providers;
     private readonly ILibraryManager _library;
     private readonly IDirectoryService _directoryService;
+    private readonly IUserManager _users;
     private readonly ILogger<YtMusicController> _logger;
 
-    public YtMusicController(YtMusicService yt, IProviderManager providers, ILibraryManager library, IDirectoryService directoryService, ILogger<YtMusicController> logger)
+    public YtMusicController(YtMusicService yt, IProviderManager providers, ILibraryManager library, IDirectoryService directoryService, IUserManager users, ILogger<YtMusicController> logger)
     {
         _yt = yt;
         _providers = providers;
         _library = library;
         _directoryService = directoryService;
+        _users = users;
         _logger = logger;
     }
 
@@ -76,7 +78,6 @@ public class YtMusicController : ControllerBase
         duration = i.Duration,
         thumbnail = i.Thumbnail,
         downloaded = i.DownloadedPath.Length > 0,
-        downloadedPath = i.DownloadedPath,
     };
 
     [HttpGet("search")]
@@ -204,15 +205,22 @@ public class YtMusicController : ControllerBase
                 return StatusCode((int)response.StatusCode, new { message = "YouTube a répondu " + (int)response.StatusCode });
 
             Response.StatusCode = (int)response.StatusCode;
-            Response.ContentType = "audio/mp4";
+            Response.ContentType = response.Content.Headers.ContentType?.MediaType ?? "audio/mp4";
             foreach (var header in response.Headers)
             {
                 if (header.Key is "Content-Length" or "Content-Range" or "Accept-Ranges")
                     Response.Headers[header.Key] = string.Join(",", header.Value);
             }
+            foreach (var header in response.Content.Headers)
+            {
+                if (header.Key is "Content-Length" or "Content-Range" or "Accept-Ranges")
+                    Response.Headers[header.Key] = string.Join(",", header.Value);
+            }
             Response.Headers["Accept-Ranges"] = "bytes";
+            // The response body streams after this action returns: dispose the upstream message then.
+            HttpContext.Response.RegisterForDispose(response);
             var upstreamStream = await response.Content.ReadAsStreamAsync(ct);
-            return new FileStreamResult(upstreamStream, "audio/mp4");
+            return new FileStreamResult(upstreamStream, Response.ContentType);
         }
         catch (Exception error)
         {
@@ -232,8 +240,9 @@ public class YtMusicController : ControllerBase
     public async Task<IActionResult> Feed(CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
-        if (FeedCache.At != default && now - FeedCache.At < TimeSpan.FromMinutes(15) && FeedCache.Value != null)
-            return Ok(FeedCache.Value);
+        var userId = CallerUserId();
+        if (userId != Guid.Empty && FeedCache.TryGetValue(userId, out var cached) && now - cached.At < TimeSpan.FromMinutes(15))
+            return Ok(cached.Value);
 
         try
         {
@@ -247,6 +256,7 @@ public class YtMusicController : ControllerBase
                     IncludeItemTypes = new[] { BaseItemKind.Audio },
                     IsPlayed = true,
                     Limit = 200,
+                    User = userId != Guid.Empty ? _users.GetUserById(userId) : null,
                 };
                 foreach (var item in _library.GetItemList(query))
                 {
@@ -283,11 +293,19 @@ public class YtMusicController : ControllerBase
                 {
                     title = "Écoutés récemment",
                     subtitle = "Repris là où vous vous êtes arrêté",
-                    tracks = recentItems.Select(ItemJson),
+                    tracks = recentItems.Select(i => new
+                    {
+                        kind = "track",
+                        videoId = i.VideoId,
+                        browseId = "",
+                        title = i.Title,
+                        subtitle = i.Artist,
+                        thumbnail = i.Thumbnail.Length > 0 ? i.Thumbnail : "https://i.ytimg.com/vi/" + i.VideoId + "/hqdefault.jpg",
+                    }),
                 });
             }
             var payload = new { sections };
-            FeedCache = (now, payload);
+            if (userId != Guid.Empty) FeedCache[userId] = (now, payload);
             return Ok(payload);
         }
         catch (Exception error)
@@ -296,7 +314,14 @@ public class YtMusicController : ControllerBase
         }
     }
 
-    private static (DateTime At, object? Value) FeedCache;
+    private static readonly ConcurrentDictionary<Guid, (DateTime At, object Value)> FeedCache = new();
+
+    /// <summary>Jellyfin user id of the caller, when the auth handler exposes one as a claim.</summary>
+    private Guid CallerUserId()
+    {
+        var value = User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(value, out var id) ? id : Guid.Empty;
+    }
 
     private static string FirstArtist(string artist) => artist.Split(',')[0].Split(" feat")[0].Trim();
 
@@ -323,6 +348,11 @@ public class YtMusicController : ControllerBase
             return StatusCode(412, new { message = "Aucun dossier musique configuré (YtMusicFolder)." });
 
         var item = await _yt.InfoAsync(request.VideoId, ct);
+        if (item.DownloadedPath.Length > 0 && System.IO.File.Exists(item.DownloadedPath))
+        {
+            _yt.Touch(request.VideoId);
+            return Ok(new { downloaded = true, alreadyPresent = true, path = item.DownloadedPath, title = item.Title, artist = item.Artist });
+        }
         var safeArtist = Sanitize(item.Artist);
         var safeTitle = Sanitize(item.Title);
         var artistFolder = string.IsNullOrEmpty(safeArtist) ? "YouTube" : safeArtist;
@@ -332,7 +362,7 @@ public class YtMusicController : ControllerBase
 
         // Plain m4a download, no ffmpeg post-processing (the container has none): the artist
         // folder + clean file name carry the metadata for Jellyfin's own scanner.
-        await YtMusicServiceRun(list =>
+        var stdout = await YtMusicServiceRun(list =>
         {
             list.Add("-q");
             list.Add("--no-warnings");
@@ -341,14 +371,21 @@ public class YtMusicController : ControllerBase
             list.Add("-o");
             list.Add(outTemplate);
             list.Add("--no-playlist");
+            list.Add("--print");
+            list.Add("after_move:filepath");
             list.Add("https://www.youtube.com/watch?v=" + request.VideoId);
         }, ct);
-
-        // Find the file yt-dlp just wrote, then ask Jellyfin to refresh its folder only.
-        var file = Directory.GetFiles(targetDir, "*.m4a")
-            .OrderByDescending(f => System.IO.File.GetLastWriteTimeUtc(f))
-            .FirstOrDefault();
-        if (file == null)
+        // yt-dlp prints the exact final path; never guess with "newest file in the folder".
+        var file = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .LastOrDefault(l => l.Length > 0);
+        if (string.IsNullOrEmpty(file) || !System.IO.File.Exists(file))
+        {
+            file = Directory.GetFiles(targetDir, "*.m4a")
+                .OrderByDescending(System.IO.File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        if (string.IsNullOrEmpty(file))
             return StatusCode(502, new { message = "Téléchargement terminé mais aucun .m4a trouvé." });
 
         var folderItem = _library.FindByPath(targetDir, true)
@@ -375,7 +412,7 @@ public class YtMusicController : ControllerBase
         return Ok(new { downloaded = true, path = file, title = item.Title, artist = item.Artist });
     }
 
-    private static async Task YtMusicServiceRun(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct)
+    private static async Task<string> YtMusicServiceRun(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct)
     {
         var psi = new System.Diagnostics.ProcessStartInfo
         {
@@ -386,13 +423,16 @@ public class YtMusicController : ControllerBase
         };
         args(psi.ArgumentList);
         using var process = System.Diagnostics.Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEndAsync(ct);
         var stderr = process.StandardError.ReadToEndAsync(ct);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(10));
         try { await process.WaitForExitAsync(timeout.Token); }
         catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException("yt-dlp timeout"); }
+        var output = await stdout;
         if (process.ExitCode != 0)
             throw new InvalidOperationException("yt-dlp: " + (await stderr).Split('\n').LastOrDefault(l => l.Length > 0)?.Trim());
+        return output;
     }
 
     private static string Sanitize(string value)
