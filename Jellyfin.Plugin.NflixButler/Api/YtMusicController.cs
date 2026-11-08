@@ -205,13 +205,22 @@ public class YtMusicController : ControllerBase
             return BadRequest(new { message = "videoId invalide" });
 
         _yt.Touch(videoId, CallerIdentity.HistoryKey(User));
+        return await ProxyAudio(this, _yt, videoId, ct);
+    }
+
+    /// <summary>Audio proxy shared with the catalogue routes: Range forwarded, signed URL never exposed.</summary>
+    internal static async Task<IActionResult> ProxyAudio(ControllerBase controller, YtMusicService yt, string videoId, CancellationToken ct)
+    {
+        var Request = controller.Request;
+        var Response = controller.Response;
+        var HttpContext = controller.HttpContext;
 
         await StreamGate.WaitAsync(ct);
         try
         {
             if (!UrlCache.TryGetValue(videoId, out var hit) || DateTime.UtcNow - hit.At > TimeSpan.FromMinutes(5))
             {
-                hit = (DateTime.UtcNow, await _yt.StreamUrlAsync(videoId, ct));
+                hit = (DateTime.UtcNow, await yt.StreamUrlAsync(videoId, ct));
                 if (UrlCache.Count > 2000) UrlCache.Clear();
                 UrlCache[videoId] = hit;
             }
@@ -222,7 +231,12 @@ public class YtMusicController : ControllerBase
                 upstream.Headers.Range = parsed;
             var response = await Http.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
-                return StatusCode(502, new { message = "Source audio indisponible (" + (int)response.StatusCode + ")." });
+            {
+                // Expired or refused signed URL: forget it so the next try resolves a fresh one.
+                UrlCache.TryRemove(videoId, out _);
+                response.Dispose();
+                return controller.StatusCode(502, new { message = "Source audio indisponible (" + (int)response.StatusCode + ")." });
+            }
 
             Response.StatusCode = (int)response.StatusCode;
             Response.ContentType = response.Content.Headers.ContentType?.MediaType ?? "audio/mp4";
@@ -242,9 +256,9 @@ public class YtMusicController : ControllerBase
             var upstreamStream = await response.Content.ReadAsStreamAsync(ct);
             return new FileStreamResult(upstreamStream, Response.ContentType);
         }
-        catch (Exception error)
+        catch (Exception)
         {
-            return Upstream(error);
+            return controller.StatusCode(502, new { message = "Source musicale indisponible." });
         }
         finally
         {

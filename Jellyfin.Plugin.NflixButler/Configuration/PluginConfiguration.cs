@@ -80,6 +80,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Folder where YouTube Music downloads land (inside the music library, refreshed after each download).</summary>
     public string YtMusicFolder { get; set; } = "/media/plex/Musiques/YouTube";
 
+    /// <summary>Lets every signed-in user add online tracks to the music library (otherwise administrators only).</summary>
+    public bool AllowUserDownloads { get; set; } = false;
+
+    /// <summary>Google OAuth client (type "TVs and Limited Input devices") for linking YouTube Music accounts.</summary>
+    public string GoogleClientId { get; set; } = "";
+
+    /// <summary>Secret of the Google OAuth client.</summary>
+    public string GoogleClientSecret { get; set; } = "";
+
     /// <summary>Video containers the butler reacts to.</summary>
     public string[] VideoExtensions { get; set; } =
     {

@@ -27,7 +27,7 @@ public sealed class YtHit
  */
 public sealed class YtMusicService
 {
-    private static readonly string Binary =
+    internal static readonly string Binary =
         System.IO.File.Exists("/config/bin/yt-dlp") ? "/config/bin/yt-dlp" : "yt-dlp";
 
     private static readonly ConcurrentDictionary<string, (DateTime At, List<YtHit> Hits)> MemCache = new();
@@ -42,14 +42,18 @@ public sealed class YtMusicService
 
     public YtStore Store => _store;
 
-    private static async Task<string> RunAsync(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct)
+    internal static Task<string> RunAsync(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct) =>
+        RunProcessAsync(Binary, args, ct, 60, RunGate);
+
+    /// <summary>Runs yt-dlp (or [binary]) with an argument list (never a shell), killing it after [timeoutSeconds].</summary>
+    internal static async Task<string> RunProcessAsync(string binary, Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct, int timeoutSeconds, SemaphoreSlim? gate = null)
     {
-        await RunGate.WaitAsync(ct).ConfigureAwait(false);
+        if (gate != null) await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var psi = new ProcessStartInfo
             {
-                FileName = Binary,
+                FileName = binary,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -59,20 +63,20 @@ public sealed class YtMusicService
             var stdout = process.StandardOutput.ReadToEndAsync(ct);
             var stderr = process.StandardError.ReadToEndAsync(ct);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(60));
+            timeout.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
             try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException("yt-dlp timeout"); }
+            catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException(System.IO.Path.GetFileName(binary) + " timeout"); }
             var output = await stdout.ConfigureAwait(false);
             if (process.ExitCode != 0)
             {
                 var error = await stderr.ConfigureAwait(false);
-                throw new InvalidOperationException("yt-dlp: " + error.Split('\n').LastOrDefault(l => l.Length > 0)?.Trim());
+                throw new InvalidOperationException(System.IO.Path.GetFileName(binary) + ": " + error.Split('\n').LastOrDefault(l => l.Length > 0)?.Trim());
             }
             return output;
         }
         finally
         {
-            RunGate.Release();
+            gate?.Release();
         }
     }
 

@@ -1,153 +1,107 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nflix Butler</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #0b0b10; color: #e8e8ee; }
-  h1 { font-size: 1.4rem; margin: 0 0 4px; }
-  h2 { font-size: 1rem; margin: 24px 0 8px; color: #9a9ab0; text-transform: uppercase; letter-spacing: .06em; }
-  p.muted { color: #9a9ab0; font-size: .85rem; margin: 0 0 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-  label { display: block; font-size: .8rem; color: #9a9ab0; margin-bottom: 4px; }
-  input[type=text], input[type=number], input[type=password], textarea {
-    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid #2a2a38;
-    background: #14141d; color: #e8e8ee; font-size: .9rem;
-  }
-  textarea { min-height: 64px; font-family: inherit; }
-  .check { display: flex; align-items: center; gap: 8px; padding: 9px 0; font-size: .9rem; }
-  .check input { width: 18px; height: 18px; accent-color: #e50914; }
-  .actions { display: flex; gap: 10px; margin-top: 24px; align-items: center; }
-  button {
-    padding: 10px 18px; border-radius: 8px; border: 0; cursor: pointer; font-size: .9rem; font-weight: 600;
-    background: #e50914; color: #fff;
-  }
-  button.secondary { background: #23232f; color: #e8e8ee; }
-  #msg { font-size: .85rem; color: #4ade80; }
-  #err { font-size: .85rem; color: #f87171; }
-  a { color: #e50914; }
-</style>
+    <meta charset="utf-8">
+    <title>Nflix Butler</title>
 </head>
 <body>
-<h1>Nflix Butler</h1>
-<p class="muted">Réglages du greffon. <a href="/Plugins/NflixButler/web/dashboard" target="_blank">Ouvrir le tableau de bord</a></p>
-<div id="err"></div>
-<form id="f">
-  <h2>Surveillance</h2>
-  <div class="grid">
-    <div><label>Activé</label><div class="check"><input type="checkbox" id="Enabled"></div></div>
-    <div><label>Intervalle de scrutation (s)</label><input type="number" id="PollSeconds"></div>
-    <div><label>Dossiers supplémentaires (séparés par des virgules)</label><input type="text" id="ExtraRoots"></div>
-    <div><label>Taille minimale d'un fichier (Mo)</label><input type="number" id="MinFileSizeMb"></div>
-    <div><label>Extensions vidéo reconnues (séparées par des virgules)</label><input type="text" id="VideoExtensions"></div>
-    <div><label>Dossiers ignorés (séparés par des virgules)</label><input type="text" id="SkipFolders"></div>
-  </div>
-  <h2>Bibliothèques</h2>
-  <div class="grid">
-    <div><label>Films</label><input type="text" id="MovieLibrary"></div>
-    <div><label>Séries</label><input type="text" id="SeriesLibrary"></div>
-    <div><label>Animés</label><input type="text" id="AnimeLibrary"></div>
-    <div><label>Mots-clés anime (séparés par des virgules)</label><input type="text" id="AnimeKeywords"></div>
-  </div>
-  <h2>Réparation</h2>
-  <div class="grid">
-    <div><label>Réparer les fiches non identifiées</label><div class="check"><input type="checkbox" id="FixUnmatched"></div></div>
-    <div><label>Réparations max par passage</label><input type="number" id="MaxRepairsPerRun"></div>
-    <div><label>Rafraîchissements max par passage</label><input type="number" id="MaxRefreshesPerRun"></div>
-    <div><label>Entrées de journal conservées</label><input type="number" id="KeepEntries"></div>
-  </div>
-  <h2>Musique en ligne</h2>
-  <div class="grid">
-    <div><label>Dossier de téléchargement (dans la bibliothèque musique)</label><input type="text" id="YtMusicFolder"></div>
-  </div>
-  <h2>Comptes liés (Deezer / Spotify)</h2>
-  <div class="grid">
-    <div><label>Redirect URI (identique dans l'app du fournisseur)</label><input type="text" id="SyncRedirectUri"></div>
-    <div><label>Deezer — App ID</label><input type="text" id="DeezerAppId"></div>
-    <div><label>Deezer — Secret</label><input type="password" id="DeezerAppSecret"></div>
-    <div><label>Spotify — Client ID</label><input type="text" id="SpotifyClientId"></div>
-    <div><label>Spotify — Client Secret</label><input type="password" id="SpotifyClientSecret"></div>
-  </div>
-  <h2>Divers</h2>
-  <div class="grid">
-    <div><label>Ajouter un lien tableau de bord dans le client web</label><div class="check"><input type="checkbox" id="InjectWebDashboard"></div></div>
-    <div><label>Thème web Nflix (expérimental, clone uniquement)</label><div class="check"><input type="checkbox" id="NflixWebTheme"></div></div>
-  </div>
-  <div class="actions">
-    <button type="submit">Enregistrer</button>
-    <button type="button" class="secondary" id="reload">Recharger</button>
-    <span id="msg"></span>
-  </div>
-</form>
-<script>
-function token() {
-  try {
-    if (window.ApiClient && typeof window.ApiClient.accessToken === 'function') return window.ApiClient.accessToken();
-    if (window.parent && window.parent.ApiClient && typeof window.parent.ApiClient.accessToken === 'function') return window.parent.ApiClient.accessToken();
-  } catch (e) {}
-  try {
-    var raw = localStorage.getItem('jellyfin_credentials');
-    if (raw) {
-      var c = JSON.parse(raw);
-      if (c && c.AccessToken) return c.AccessToken;
-      var servers = (c && c.Servers) || [];
-      var withToken = servers.find(function (s2) { return s2 && s2.AccessToken; }) || servers[0];
-      if (withToken && withToken.AccessToken) return withToken.AccessToken;
-    }
-  } catch (e) {}
-  var m = /[?&](api_key|apiKey|token)=([^&]+)/.exec(location.search);
-  if (m) return decodeURIComponent(m[2]);
-  return localStorage.getItem('nflix_butler_key') || '';
-}
-async function api(path, method, body) {
-  var t = token();
-  if (!t) throw new Error('Ouvre cette page depuis Jellyfin (connecté) ou colle une clé API.');
-  var res = await fetch('/Plugins/NflixButler/' + path, {
-    method: method || 'GET',
-    headers: { 'X-Emby-Token': t, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
-  return res.json();
-}
-function setArr(id, v) { document.getElementById(id).value = Array.isArray(v) ? v.join(', ') : (v || ''); }
-function getArr(id) { return document.getElementById(id).value.split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
-async function load() {
-  document.getElementById('err').textContent = '';
-  try {
-    var c = await api('api/settings');
-    for (var k in c) {
-      var el = document.getElementById(k);
-      if (!el) continue;
-      if (el.type === 'checkbox') el.checked = !!c[k];
-      else if (Array.isArray(c[k])) el.value = c[k].join(', ');
-      else el.value = c[k] == null ? '' : c[k];
-    }
-  } catch (e) { document.getElementById('err').textContent = e.message; }
-}
-document.getElementById('f').addEventListener('submit', async function (ev) {
-  ev.preventDefault();
-  document.getElementById('msg').textContent = '';
-  document.getElementById('err').textContent = '';
-  try {
-    var c = await api('api/settings');
-    for (var k in c) {
-      var el = document.getElementById(k);
-      if (!el) continue;
-      if (el.type === 'checkbox') c[k] = el.checked;
-      else if (Array.isArray(c[k])) c[k] = getArr(k);
-      else if (el.type === 'number') c[k] = parseInt(el.value || '0', 10);
-      else c[k] = el.value;
-    }
-    await api('api/settings', 'POST', c);
-    document.getElementById('msg').textContent = 'Enregistré.';
-  } catch (e) { document.getElementById('err').textContent = e.message; }
-});
-document.getElementById('reload').addEventListener('click', load);
-load();
-</script>
+<div id="NflixButlerConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="NflixButlerConfigForm">
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">Nflix Butler</h2>
+                    <p>Réglages du greffon. <a is="emby-linkbutton" class="button-link" href="/Plugins/NflixButler/web/dashboard" target="_blank">Ouvrir le tableau de bord</a></p>
+                </div>
+
+                <h3>Surveillance</h3>
+                <div class="checkboxContainer"><label><input is="emby-checkbox" type="checkbox" id="Enabled" /><span>Activé</span></label></div>
+                <div class="inputContainer"><input is="emby-input" type="number" id="PollSeconds" label="Intervalle de scrutation (s)" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="ExtraRoots" data-list="1" label="Dossiers supplémentaires (séparés par des virgules)" /></div>
+                <div class="inputContainer"><input is="emby-input" type="number" id="MinFileSizeMb" label="Taille minimale d'un fichier (Mo)" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="VideoExtensions" data-list="1" label="Extensions vidéo (séparées par des virgules)" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="SkipFolders" data-list="1" label="Dossiers ignorés (séparés par des virgules)" /></div>
+
+                <h3>Bibliothèques</h3>
+                <div class="inputContainer"><input is="emby-input" type="text" id="MovieLibrary" label="Films" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="SeriesLibrary" label="Séries" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="AnimeLibrary" label="Animés" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="AnimeKeywords" data-list="1" label="Mots-clés anime (séparés par des virgules)" /></div>
+
+                <h3>Réparation</h3>
+                <div class="checkboxContainer"><label><input is="emby-checkbox" type="checkbox" id="FixUnmatched" /><span>Réparer les fiches non identifiées</span></label></div>
+                <div class="inputContainer"><input is="emby-input" type="number" id="MaxRepairsPerRun" label="Réparations max par passage" /></div>
+                <div class="inputContainer"><input is="emby-input" type="number" id="MaxRefreshesPerRun" label="Rafraîchissements max par passage" /></div>
+                <div class="inputContainer"><input is="emby-input" type="number" id="KeepEntries" label="Entrées de journal conservées" /></div>
+
+                <h3>Musique en ligne</h3>
+                <div class="inputContainer"><input is="emby-input" type="text" id="YtMusicFolder" label="Dossier de téléchargement (dans la bibliothèque musique)" /></div>
+                <div class="checkboxContainer"><label><input is="emby-checkbox" type="checkbox" id="AllowUserDownloads" /><span>Tous les utilisateurs peuvent ajouter des titres à la bibliothèque</span></label></div>
+
+                <h3>Comptes liés</h3>
+                <p class="fieldDescription">Deezer et Spotify : créez une application chez le fournisseur avec l'URL de redirection ci-dessous. YouTube Music : client OAuth Google de type « TV et appareils à saisie limitée » avec l'API YouTube Data v3 activée.</p>
+                <div class="inputContainer"><input is="emby-input" type="text" id="SyncRedirectUri" label="URL de redirection (Deezer / Spotify)" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="DeezerAppId" label="Deezer — App ID" /></div>
+                <div class="inputContainer"><input is="emby-input" type="password" id="DeezerAppSecret" label="Deezer — Secret" autocomplete="off" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="SpotifyClientId" label="Spotify — Client ID" /></div>
+                <div class="inputContainer"><input is="emby-input" type="password" id="SpotifyClientSecret" label="Spotify — Client Secret" autocomplete="off" /></div>
+                <div class="inputContainer"><input is="emby-input" type="text" id="GoogleClientId" label="Google — Client ID" /></div>
+                <div class="inputContainer"><input is="emby-input" type="password" id="GoogleClientSecret" label="Google — Client Secret" autocomplete="off" /></div>
+
+                <h3>Divers</h3>
+                <div class="checkboxContainer"><label><input is="emby-checkbox" type="checkbox" id="InjectWebDashboard" /><span>Lien vers le tableau de bord dans le client web</span></label></div>
+                <div class="checkboxContainer"><label><input is="emby-checkbox" type="checkbox" id="NflixWebTheme" /><span>Thème web Nflix (expérimental)</span></label></div>
+
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Enregistrer</span></button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '7f3c1a52-9b64-4d0e-8f21-6c1d2ba94e77';
+            var page = document.querySelector('#NflixButlerConfigPage');
+            var form = page.querySelector('#NflixButlerConfigForm');
+            function fields() { return form.querySelectorAll('input[id]'); }
+
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    fields().forEach(function (el) {
+                        var v = config[el.id];
+                        if (el.type === 'checkbox') el.checked = !!v;
+                        else if (Array.isArray(v)) el.value = v.join(', ');
+                        else el.value = v == null ? '' : v;
+                    });
+                    Dashboard.hideLoadingMsg();
+                }).catch(function () {
+                    Dashboard.hideLoadingMsg();
+                    Dashboard.alert('Impossible de charger la configuration.');
+                });
+            });
+
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    fields().forEach(function (el) {
+                        if (el.type === 'checkbox') config[el.id] = el.checked;
+                        else if (el.getAttribute('data-list')) config[el.id] = el.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+                        else if (el.type === 'number') config[el.id] = parseInt(el.value || '0', 10);
+                        else config[el.id] = el.value.trim();
+                    });
+                    return ApiClient.updatePluginConfiguration(pluginId, config);
+                }).then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+                }).catch(function () {
+                    Dashboard.hideLoadingMsg();
+                    Dashboard.alert('Enregistrement impossible.');
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
 </body>
 </html>

@@ -49,6 +49,10 @@ public sealed class YtState
     public Dictionary<string, List<YtSearchRecord>> UserSearches { get; set; } = new(StringComparer.Ordinal);
     /// <summary>Per-user listens (user id "N" → newest first).</summary>
     public Dictionary<string, List<YtRecentRecord>> UserRecent { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Catalogue track id → resolved audio id.</summary>
+    public Dictionary<string, string> CatalogVideo { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Catalogue track id → downloaded file in the music library.</summary>
+    public Dictionary<string, string> CatalogFiles { get; set; } = new(StringComparer.Ordinal);
 }
 
 /**
@@ -208,6 +212,26 @@ public sealed class YtStore
     public List<YtRecentRecord> Recent(int limit)
     {
         lock (_gate) { return State.Recent.Take(Math.Clamp(limit, 1, 200)).ToList(); }
+    }
+
+    public string? CatalogVideo(string trackId)
+    {
+        lock (_gate) { return State.CatalogVideo != null && State.CatalogVideo.TryGetValue(trackId, out var v) ? v : null; }
+    }
+
+    public void SetCatalogVideo(string trackId, string videoId)
+    {
+        lock (_gate) { (State.CatalogVideo ??= new(StringComparer.Ordinal))[trackId] = videoId; }
+    }
+
+    public string? CatalogFile(string trackId)
+    {
+        lock (_gate) { return State.CatalogFiles != null && State.CatalogFiles.TryGetValue(trackId, out var v) ? v : null; }
+    }
+
+    public void SetCatalogFile(string trackId, string path)
+    {
+        lock (_gate) { (State.CatalogFiles ??= new(StringComparer.Ordinal))[trackId] = path; }
     }
 
     public static string Normalize(string value) =>

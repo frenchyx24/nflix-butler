@@ -12,7 +12,7 @@ public static class CallerIdentity
 {
     private static readonly Regex VideoIdRx = new("^[A-Za-z0-9_-]{11}$", RegexOptions.Compiled);
     private static readonly Regex BrowseIdRx = new("^[A-Za-z0-9_-]{2,64}$", RegexOptions.Compiled);
-    private static readonly Regex PlaylistIdRx = new("^[A-Za-z0-9]{1,64}$", RegexOptions.Compiled);
+    private static readonly Regex PlaylistIdRx = new("^[A-Za-z0-9_-]{1,64}$", RegexOptions.Compiled);
 
     public static bool IsVideoId(string? value) => value != null && VideoIdRx.IsMatch(value);
 

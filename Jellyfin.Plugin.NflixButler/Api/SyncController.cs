@@ -55,6 +55,7 @@ public class SyncController : ControllerBase
     /// <summary>Refreshes a Spotify access token when it is about to expire (one hour lifetime).</summary>
     private async Task<SyncAccount> FreshAsync(string userId, SyncAccount account, CancellationToken ct)
     {
+        if (account.Service == "youtube") return await FreshGoogleAsync(userId, account, ct);
         if (account.Service != "spotify" || account.ExpiresAtUtc > DateTime.UtcNow.AddMinutes(2)) return account;
         if (string.IsNullOrWhiteSpace(account.RefreshToken)) return account;
         try
@@ -115,11 +116,156 @@ public class SyncController : ControllerBase
     {
         public string Title { get; set; } = "";
         public string Artist { get; set; } = "";
+        public string VideoId { get; set; } = "";
+    }
+
+    public sealed class GoogleRequest
+    {
+        public string UserId { get; set; } = "";
+    }
+
+    private const string GoogleScope = "https://www.googleapis.com/auth/youtube.readonly";
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DeviceCode, DateTime Expires)> GoogleDevices = new();
+
+    /**
+     * Starts the Google device flow (no redirect, works on any phone): the app shows the code and
+     * opens google.com/device; the device code itself stays on the server.
+     */
+    [HttpPost("google/start")]
+    public async Task<IActionResult> GoogleStart([FromBody] GoogleRequest request, CancellationToken ct)
+    {
+        if (IsOtherUser(request?.UserId)) return Forbid();
+        if (string.IsNullOrWhiteSpace(Config.GoogleClientId) || string.IsNullOrWhiteSpace(Config.GoogleClientSecret))
+            return StatusCode(412, new { message = "Compte Google non configuré côté serveur (GoogleClientId/GoogleClientSecret)." });
+        try
+        {
+            using var res = await Http.PostAsync("https://oauth2.googleapis.com/device/code", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = Config.GoogleClientId,
+                ["scope"] = GoogleScope,
+            }), ct);
+            var text = await res.Content.ReadAsStringAsync(ct);
+            if (!res.IsSuccessStatusCode) return StatusCode(502, new { message = "Google a refusé la demande (" + (int)res.StatusCode + ")." });
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            var deviceCode = root.GetProperty("device_code").GetString() ?? "";
+            var expires = root.TryGetProperty("expires_in", out var e) && e.ValueKind == JsonValueKind.Number ? e.GetInt32() : 1800;
+            GoogleDevices[request!.UserId.ToLowerInvariant()] = (deviceCode, DateTime.UtcNow.AddSeconds(expires));
+            return Ok(new
+            {
+                userCode = root.GetProperty("user_code").GetString(),
+                verificationUrl = root.TryGetProperty("verification_url", out var vu) ? vu.GetString() : "https://www.google.com/device",
+                interval = root.TryGetProperty("interval", out var iv) && iv.ValueKind == JsonValueKind.Number ? iv.GetInt32() : 5,
+                expiresIn = expires,
+            });
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning("sync: google start failed: {Message}", error.Message);
+            return StatusCode(502, new { message = "Google injoignable." });
+        }
+    }
+
+    /** One poll of the device flow: pending, slow_down, linked or expired. */
+    [HttpPost("google/poll")]
+    public async Task<IActionResult> GooglePoll([FromBody] GoogleRequest request, CancellationToken ct)
+    {
+        if (IsOtherUser(request?.UserId)) return Forbid();
+        var key = request!.UserId.ToLowerInvariant();
+        if (!GoogleDevices.TryGetValue(key, out var device) || device.Expires < DateTime.UtcNow)
+            return Ok(new { status = "expired" });
+        try
+        {
+            using var res = await Http.PostAsync("https://oauth2.googleapis.com/token", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = Config.GoogleClientId,
+                ["client_secret"] = Config.GoogleClientSecret,
+                ["device_code"] = device.DeviceCode,
+                ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code",
+            }), ct);
+            var text = await res.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (!res.IsSuccessStatusCode)
+            {
+                var error = root.TryGetProperty("error", out var er) ? er.GetString() ?? "" : "";
+                if (error is "authorization_pending" or "slow_down") return Ok(new { status = error == "slow_down" ? "slow_down" : "pending" });
+                GoogleDevices.TryRemove(key, out _);
+                return Ok(new { status = error == "access_denied" ? "denied" : "expired" });
+            }
+            GoogleDevices.TryRemove(key, out _);
+            var account = new SyncAccount
+            {
+                Service = "youtube",
+                AccessToken = root.GetProperty("access_token").GetString() ?? "",
+                RefreshToken = root.TryGetProperty("refresh_token", out var rt) ? rt.GetString() ?? "" : "",
+                ExpiresAtUtc = DateTime.UtcNow.AddSeconds(root.TryGetProperty("expires_in", out var ei) && ei.ValueKind == JsonValueKind.Number ? ei.GetInt32() : 3600),
+                LinkedAtUtc = DateTime.UtcNow,
+            };
+            try
+            {
+                var me = await GoogleGetAsync("/youtube/v3/channels?mine=true&part=snippet", account, ct);
+                using var meDoc = JsonDocument.Parse(me);
+                if (meDoc.RootElement.TryGetProperty("items", out var items) && items.GetArrayLength() > 0)
+                {
+                    var first = items[0];
+                    account.ProfileId = first.TryGetProperty("id", out var cid) ? cid.GetString() ?? "" : "";
+                    account.ProfileName = first.TryGetProperty("snippet", out var sn) && sn.TryGetProperty("title", out var tt) ? tt.GetString() ?? "" : "";
+                }
+            }
+            catch { }
+            _store.Put(request.UserId, account);
+            _store.Save();
+            _logger.LogInformation("Sync: compte youtube lié pour {User}", request.UserId);
+            return Ok(new { status = "linked", profileName = account.ProfileName });
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning("sync: google poll failed: {Message}", error.Message);
+            return StatusCode(502, new { message = "Google injoignable." });
+        }
+    }
+
+    private async Task<SyncAccount> FreshGoogleAsync(string userId, SyncAccount account, CancellationToken ct)
+    {
+        if (account.ExpiresAtUtc > DateTime.UtcNow.AddMinutes(2) || string.IsNullOrWhiteSpace(account.RefreshToken)) return account;
+        try
+        {
+            using var res = await Http.PostAsync("https://oauth2.googleapis.com/token", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = Config.GoogleClientId,
+                ["client_secret"] = Config.GoogleClientSecret,
+                ["refresh_token"] = account.RefreshToken,
+                ["grant_type"] = "refresh_token",
+            }), ct);
+            if (!res.IsSuccessStatusCode) { _logger.LogWarning("sync: Google refresh failed {Status}", (int)res.StatusCode); return account; }
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+            account.AccessToken = doc.RootElement.GetProperty("access_token").GetString() ?? account.AccessToken;
+            account.ExpiresAtUtc = DateTime.UtcNow.AddSeconds(doc.RootElement.TryGetProperty("expires_in", out var e) && e.ValueKind == JsonValueKind.Number ? e.GetInt32() : 3600);
+            _store.Put(userId, account);
+            _store.Save();
+        }
+        catch (Exception error)
+        {
+            _logger.LogWarning("sync: Google refresh failed: {Message}", error.Message);
+        }
+        return account;
+    }
+
+    private static async Task<string> GoogleGetAsync(string path, SyncAccount account, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com" + path);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
+        using var res = await Http.SendAsync(req, ct);
+        var text = await res.Content.ReadAsStringAsync(ct);
+        if (!res.IsSuccessStatusCode) throw new InvalidOperationException("Google " + (int)res.StatusCode);
+        return text;
     }
 
     [HttpGet("config")]
     public IActionResult Config_() => Ok(new
     {
+        youtubeConfigured = !string.IsNullOrWhiteSpace(Config.GoogleClientId) && !string.IsNullOrWhiteSpace(Config.GoogleClientSecret),
         redirectUri = Config.SyncRedirectUri,
         deezerConfigured = !string.IsNullOrWhiteSpace(Config.DeezerAppId) && !string.IsNullOrWhiteSpace(Config.DeezerAppSecret),
         deezerAppId = Config.DeezerAppId,
@@ -249,6 +395,30 @@ public class SyncController : ControllerBase
         try
         {
             account = await FreshAsync(userId ?? "", account, ct);
+            if (account.Service == "youtube")
+            {
+                var lists = new List<object> { new { id = "LM", title = "Titres likés", tracks = 0 } };
+                string? page = null;
+                for (var i = 0; i < 4; i++)
+                {
+                    var text = await GoogleGetAsync("/youtube/v3/playlists?mine=true&part=snippet,contentDetails&maxResults=50" + (page != null ? "&pageToken=" + Uri.EscapeDataString(page) : ""), account, ct);
+                    using var doc = JsonDocument.Parse(text);
+                    if (!doc.RootElement.TryGetProperty("items", out var items)) break;
+                    foreach (var p in items.EnumerateArray())
+                    {
+                        var snippet = p.TryGetProperty("snippet", out var sn) ? sn : default;
+                        lists.Add(new
+                        {
+                            id = p.TryGetProperty("id", out var pid) ? pid.GetString() ?? "" : "",
+                            title = snippet.ValueKind == JsonValueKind.Object && snippet.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
+                            tracks = p.TryGetProperty("contentDetails", out var cd) && cd.TryGetProperty("itemCount", out var ic) && ic.ValueKind == JsonValueKind.Number ? ic.GetInt32() : 0,
+                        });
+                    }
+                    page = doc.RootElement.TryGetProperty("nextPageToken", out var next) ? next.GetString() : null;
+                    if (page == null) break;
+                }
+                return Ok(new { playlists = lists });
+            }
             if (account.Service == "deezer")
             {
                 var doc = await DeezerGet("/user/playlists?limit=100", account.AccessToken, ct);
@@ -299,7 +469,34 @@ public class SyncController : ControllerBase
         var tracks = new List<TrackRef>();
         try
         {
-            if (account.Service == "deezer")
+            if (account.Service == "youtube")
+            {
+                // "LM" = the account's liked music.
+                var playlistId = request.PlaylistId == "LM" ? "LL" : request.PlaylistId;
+                string? page = null;
+                for (var i = 0; i < 10; i++)
+                {
+                    var text = await GoogleGetAsync("/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=" + Uri.EscapeDataString(playlistId) + (page != null ? "&pageToken=" + Uri.EscapeDataString(page) : ""), account, ct);
+                    using var doc = JsonDocument.Parse(text);
+                    if (!doc.RootElement.TryGetProperty("items", out var items)) break;
+                    foreach (var item in items.EnumerateArray())
+                    {
+                        if (!item.TryGetProperty("snippet", out var sn)) continue;
+                        var title = sn.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                        var owner = sn.TryGetProperty("videoOwnerChannelTitle", out var o) ? o.GetString() ?? "" : "";
+                        var videoId = sn.TryGetProperty("resourceId", out var rid) && rid.TryGetProperty("videoId", out var v) ? v.GetString() ?? "" : "";
+                        if (title.Length == 0 || title is "Deleted video" or "Private video") continue;
+                        var artist = owner.Replace(" - Topic", "").Trim();
+                        // "Artist - Title" uploads: split when the channel is not the artist.
+                        var dash = title.IndexOf(" - ", StringComparison.Ordinal);
+                        if (dash > 0 && !owner.EndsWith(" - Topic", StringComparison.Ordinal)) { artist = title[..dash].Trim(); title = title[(dash + 3)..].Trim(); }
+                        tracks.Add(new TrackRef { Title = title, Artist = artist, VideoId = CallerIdentity.IsVideoId(videoId) ? videoId : "" });
+                    }
+                    page = doc.RootElement.TryGetProperty("nextPageToken", out var next) ? next.GetString() : null;
+                    if (page == null) break;
+                }
+            }
+            else if (account.Service == "deezer")
             {
                 var doc = await DeezerGet("/playlist/" + request.PlaylistId, account.AccessToken, ct);
                 foreach (var t in doc.GetProperty("tracks").GetProperty("data").EnumerateArray())
@@ -347,7 +544,7 @@ public class SyncController : ControllerBase
             if (item != null)
                 matched.Add(new { itemId = item.Id.ToString("N"), title = track.Title, artist = track.Artist, localName = item.Name });
             else
-                missing.Add(new { title = track.Title, artist = track.Artist });
+                missing.Add(new { title = track.Title, artist = track.Artist, videoId = track.VideoId });
         }
         return Ok(new { total = tracks.Count, matched, missing });
     }
