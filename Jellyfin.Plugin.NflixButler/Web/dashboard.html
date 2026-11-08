@@ -212,6 +212,10 @@
       document.getElementById('status-badge').textContent = status.running ? 'En cours' : 'Inactif';
     }
 
+    function esc(v) {
+      return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
     function updateEntries(entries) {
       const tbody = document.querySelector('#entries-table tbody');
       tbody.innerHTML = '';
@@ -230,18 +234,18 @@
         const statusClass = status === 'ok' ? 'ok' : status === 'pending' ? 'pending' : status === 'needs-review' ? 'needs-review' : 'failed';
 
         tr.innerHTML = `
-          <td>${time}</td>
-          <td>${title}</td>
-          <td>${entry.library || ''}</td>
-          <td>${entry.action || ''}</td>
-          <td><span class="pill ${statusClass}">${status}</span></td>
+          <td>${esc(time)}</td>
+          <td>${esc(title)}</td>
+          <td>${esc(entry.library)}</td>
+          <td>${esc(entry.action)}</td>
+          <td><span class="pill ${statusClass}">${esc(status)}</span></td>
         `;
         if (entry.itemId) {
           const td = document.createElement('td');
           const a = document.createElement('a');
           a.href = '#';
           a.textContent = 'Voir';
-          a.onclick = (e) => { e.preventDefault(); window.open('/web/index.html#!/details?id=' + entry.itemId); };
+          a.onclick = (e) => { e.preventDefault(); window.open('/web/index.html#!/details?id=' + encodeURIComponent(entry.itemId)); };
           td.appendChild(a);
           tr.appendChild(td);
         }
@@ -257,13 +261,13 @@
         div.className = 'unmatched-item';
         div.innerHTML = `
           <div>
-            <p>${item.name || ''}</p>
-            <p class="type">${item.type || ''}${item.year ? ' · ' + item.year : ''}</p>
-            <p class="path">${item.path || ''}</p>
+            <p>${esc(item.name)}</p>
+            <p class="type">${esc(item.type)}${item.year ? ' · ' + esc(item.year) : ''}</p>
+            <p class="path">${esc(item.path)}</p>
           </div>
           <div style="display: flex; gap: 0.5rem; align-items: center;">
-            <button data-id="${item.itemId}" class="fix">Réparer</button>
-            <button data-id="${item.itemId}" class="refresh">Rafraîchir</button>
+            <button data-id="${esc(item.itemId)}" class="fix">Réparer</button>
+            <button data-id="${esc(item.itemId)}" class="refresh">Rafraîchir</button>
           </div>
         `;
         container.appendChild(div);

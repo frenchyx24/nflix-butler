@@ -44,22 +44,13 @@ public class SyncController : ControllerBase
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
-    /// <summary>Jellyfin user id of the caller, when the auth handler exposes one as a claim.</summary>
-    private string? CallerUserId()
-    {
-        var value = User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-        return Guid.TryParse(value, out _) ? value : null;
-    }
-
     /// <summary>
     /// Guards a userId taken from the body or the query string: a signed-in user may only read or
-    /// change their own linked accounts, never another user's stored streaming tokens.
+    /// change their own linked accounts; only an administrator may name another user. A request
+    /// without a resolvable caller (or without a valid userId) is refused.
     /// </summary>
-    private bool IsOtherUser(string? requested)
-    {
-        var caller = CallerUserId();
-        return caller != null && !string.Equals(caller, requested, StringComparison.OrdinalIgnoreCase);
-    }
+    private bool IsOtherUser(string? requested) =>
+        !Guid.TryParse(requested, out _) || CallerIdentity.EffectiveUser(User, requested) == null;
 
     /// <summary>Refreshes a Spotify access token when it is about to expire (one hour lifetime).</summary>
     private async Task<SyncAccount> FreshAsync(string userId, SyncAccount account, CancellationToken ct)
@@ -80,7 +71,7 @@ public class SyncController : ControllerBase
             var text = await res.Content.ReadAsStringAsync(ct);
             if (!res.IsSuccessStatusCode)
             {
-                _logger.LogWarning("sync: Spotify refresh failed {Status} {Body}", (int)res.StatusCode, text);
+                _logger.LogWarning("sync: Spotify refresh failed {Status}", (int)res.StatusCode);
                 return account;
             }
             using var doc = JsonDocument.Parse(text);
@@ -140,7 +131,7 @@ public class SyncController : ControllerBase
     [HttpPost("link")]
     public async Task<IActionResult> Link([FromBody] LinkRequest request, CancellationToken ct)
     {
-        var service = request.Service.ToLowerInvariant();
+        var service = (request.Service ?? "").ToLowerInvariant();
         if (service is not ("deezer" or "spotify"))
             return BadRequest(new { message = "service doit être deezer ou spotify" });
         if (string.IsNullOrWhiteSpace(request.Code) || string.IsNullOrWhiteSpace(request.UserId))
@@ -163,7 +154,7 @@ public class SyncController : ControllerBase
                     .Where(p => p.Length == 2)
                     .ToDictionary(p => p[0], p => p[1]);
                 if (!parts.TryGetValue("access_token", out var token) || string.IsNullOrWhiteSpace(token))
-                    return StatusCode(502, new { message = "Deezer a refusé le code : " + tokenText });
+                    return StatusCode(502, new { message = "Deezer a refusé le code." });
                 // With the offline_access permission Deezer returns no "expires": the token does not expire.
                 var expires = parts.TryGetValue("expires", out var exp) && int.TryParse(exp, out var e) ? e : 0;
                 var profile = await DeezerGet("/user", token, ct);
@@ -192,7 +183,7 @@ public class SyncController : ControllerBase
                     Convert.ToBase64String(Encoding.UTF8.GetBytes(Config.SpotifyClientId + ":" + Config.SpotifyClientSecret)));
                 var json = await Http.SendAsync(req, ct);
                 var text = await json.Content.ReadAsStringAsync(ct);
-                if (!json.IsSuccessStatusCode) return StatusCode(502, new { message = "Spotify a refusé le code : " + text });
+                if (!json.IsSuccessStatusCode) return StatusCode(502, new { message = "Spotify a refusé le code (" + (int)json.StatusCode + ")." });
                 using var doc = JsonDocument.Parse(text);
                 var root = doc.RootElement;
                 var profileReq = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/me");
@@ -243,7 +234,7 @@ public class SyncController : ControllerBase
     public IActionResult Unlink([FromQuery] string userId, [FromQuery] string service)
     {
         if (IsOtherUser(userId)) return Forbid();
-        _store.Remove(userId ?? "", service.ToLowerInvariant());
+        _store.Remove(userId ?? "", (service ?? "").ToLowerInvariant());
         _store.Save();
         return Ok(new { unlinked = true });
     }
@@ -253,7 +244,7 @@ public class SyncController : ControllerBase
     public async Task<IActionResult> Playlists([FromQuery] string service, [FromQuery] string userId, CancellationToken ct)
     {
         if (IsOtherUser(userId)) return Forbid();
-        var account = _store.Get(userId ?? "", service.ToLowerInvariant());
+        var account = _store.Get(userId ?? "", (service ?? "").ToLowerInvariant());
         if (account == null) return StatusCode(412, new { message = "Compte " + service + " non lié." });
         try
         {
@@ -274,7 +265,7 @@ public class SyncController : ControllerBase
                 var text = await SpotifyGetAsync(userId ?? "", "/v1/me/playlists?limit=50", account, ct);
                 using var doc = JsonDocument.Parse(text);
                 if (!doc.RootElement.TryGetProperty("items", out var entries))
-                    return StatusCode(502, new { message = "Spotify: " + text });
+                    return StatusCode(502, new { message = "Réponse Spotify inattendue." });
                 var items = entries.EnumerateArray().Select(p => new
                 {
                     id = p.GetProperty("id").GetString() ?? "",
@@ -299,7 +290,9 @@ public class SyncController : ControllerBase
     public async Task<IActionResult> Import([FromBody] ImportRequest request, CancellationToken ct)
     {
         if (IsOtherUser(request.UserId)) return Forbid();
-        var account = _store.Get(request.UserId ?? "", request.Service.ToLowerInvariant());
+        if (!CallerIdentity.IsPlaylistId(request.PlaylistId))
+            return BadRequest(new { message = "playlistId invalide" });
+        var account = _store.Get(request.UserId ?? "", (request.Service ?? "").ToLowerInvariant());
         if (account == null) return StatusCode(412, new { message = "Compte non lié." });
         account = await FreshAsync(request.UserId ?? "", account, ct);
 
@@ -486,14 +479,16 @@ public class SyncController : ControllerBase
 
         try
         {
+            var name = string.IsNullOrWhiteSpace(request.Name) ? "Nflix" : request.Name.Trim();
+            if (name.Length > 100) name = name[..100];
             var createText = await Http.GetStringAsync(
-                "https://api.deezer.com/user/playlists?access_token=" + account.AccessToken + "&request_method=POST&name=" + Uri.EscapeDataString(request.Name), ct);
+                "https://api.deezer.com/user/playlists?access_token=" + Uri.EscapeDataString(account.AccessToken) + "&request_method=POST&name=" + Uri.EscapeDataString(name), ct);
             using var createDoc = JsonDocument.Parse(createText);
             var deezerPlaylistId = createDoc.RootElement.GetProperty("id").GetInt64();
 
             var added = 0;
             var missing = new List<object>();
-            foreach (var track in request.Tracks)
+            foreach (var track in (request.Tracks ?? new List<TrackRef>()).Take(500))
             {
                 var q = "artist:\"" + track.Artist + "\" track:\"" + track.Title + "\"";
                 var searchJson = await Http.GetStringAsync("https://api.deezer.com/search?q=" + Uri.EscapeDataString(q) + "&limit=1", ct);
@@ -502,7 +497,7 @@ public class SyncController : ControllerBase
                 if (first.ValueKind != JsonValueKind.Object) { missing.Add(new { track.Title, track.Artist }); continue; }
                 var songId = first.GetProperty("id").GetInt64();
                 var addResp = await Http.GetStringAsync(
-                    "https://api.deezer.com/playlist/" + deezerPlaylistId + "/songs?access_token=" + account.AccessToken + "&request_method=POST&song_id=" + songId, ct);
+                    "https://api.deezer.com/playlist/" + deezerPlaylistId + "/songs?access_token=" + Uri.EscapeDataString(account.AccessToken) + "&request_method=POST&song_id=" + songId, ct);
                 if (addResp.Trim() == "true") added++;
             }
             return Ok(new { created = true, deezerPlaylistId, added, missing });
@@ -530,7 +525,7 @@ public class SyncController : ControllerBase
 
     private static async Task<JsonElement> DeezerGet(string path, string token, CancellationToken ct)
     {
-        var text = await Http.GetStringAsync("https://api.deezer.com" + path + (path.Contains('?') ? "&" : "?") + "access_token=" + token, ct);
+        var text = await Http.GetStringAsync("https://api.deezer.com" + path + (path.Contains('?') ? "&" : "?") + "access_token=" + Uri.EscapeDataString(token), ct);
         return JsonDocument.Parse(text).RootElement.Clone();
     }
 }

@@ -91,6 +91,7 @@ public class YtMusicController : ControllerBase
         try
         {
             var hits = await _yt.SearchAsync(q, limit, ct);
+            _yt.Store.RecordUserSearch(CallerIdentity.HistoryKey(User), q);
             return Ok(new
             {
                 results = hits.Where(h => h.Kind == "track").Select(HitJson),
@@ -100,7 +101,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
     }
 
@@ -108,7 +109,7 @@ public class YtMusicController : ControllerBase
     [HttpGet("info")]
     public async Task<IActionResult> Info([FromQuery] string videoId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(videoId) || videoId.Length > 32)
+        if (!CallerIdentity.IsVideoId(videoId))
             return BadRequest(new { message = "videoId invalide" });
         try
         {
@@ -117,7 +118,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
     }
 
@@ -126,14 +127,14 @@ public class YtMusicController : ControllerBase
     public IActionResult History([FromQuery] int limit = 20) =>
         Ok(new
         {
-            searches = _yt.Store.Searches(limit).Select(s => new { query = s.Query, atUtc = s.AtUtc }),
+            searches = _yt.Store.UserSearchList(CallerIdentity.HistoryKey(User), limit).Select(s => new { query = s.Query, atUtc = s.AtUtc }),
         });
 
     /// <summary>Recently played/seen tracks with their cached metadata.</summary>
     [HttpGet("recent")]
     public IActionResult Recent([FromQuery] int limit = 20)
     {
-        var recents = _yt.Store.Recent(limit);
+        var recents = _yt.Store.UserRecentList(CallerIdentity.HistoryKey(User), limit);
         return Ok(new { items = _yt.Store.Items(recents.Select(r => r.VideoId)).Select(ItemJson) });
     }
 
@@ -154,7 +155,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
     }
 
@@ -162,7 +163,7 @@ public class YtMusicController : ControllerBase
     [HttpGet("album")]
     public async Task<IActionResult> Album([FromQuery] string browseId, [FromQuery] int limit = 100, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(browseId)) return BadRequest(new { message = "browseId requis" });
+        if (!CallerIdentity.IsBrowseId(browseId)) return BadRequest(new { message = "browseId invalide" });
         try
         {
             var hits = await _yt.AlbumAsync(browseId, limit, ct);
@@ -170,7 +171,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
     }
 
@@ -183,7 +184,7 @@ public class YtMusicController : ControllerBase
     {
         var wanted = (ids ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(id => id.Length is > 0 and <= 32)
+            .Where(CallerIdentity.IsVideoId)
             .Distinct()
             .Take(200);
         var present = new List<string>();
@@ -200,10 +201,10 @@ public class YtMusicController : ControllerBase
     [HttpGet("stream")]
     public async Task<IActionResult> Stream([FromQuery] string videoId, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(videoId) || videoId.Length > 32)
+        if (!CallerIdentity.IsVideoId(videoId))
             return BadRequest(new { message = "videoId invalide" });
 
-        _yt.Touch(videoId);
+        _yt.Touch(videoId, CallerIdentity.HistoryKey(User));
 
         await StreamGate.WaitAsync(ct);
         try
@@ -211,6 +212,7 @@ public class YtMusicController : ControllerBase
             if (!UrlCache.TryGetValue(videoId, out var hit) || DateTime.UtcNow - hit.At > TimeSpan.FromMinutes(5))
             {
                 hit = (DateTime.UtcNow, await _yt.StreamUrlAsync(videoId, ct));
+                if (UrlCache.Count > 2000) UrlCache.Clear();
                 UrlCache[videoId] = hit;
             }
             var upstream = new HttpRequestMessage(HttpMethod.Get, hit.Url);
@@ -220,7 +222,7 @@ public class YtMusicController : ControllerBase
                 upstream.Headers.Range = parsed;
             var response = await Http.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
-                return StatusCode((int)response.StatusCode, new { message = "YouTube a répondu " + (int)response.StatusCode });
+                return StatusCode(502, new { message = "Source audio indisponible (" + (int)response.StatusCode + ")." });
 
             Response.StatusCode = (int)response.StatusCode;
             Response.ContentType = response.Content.Headers.ContentType?.MediaType ?? "audio/mp4";
@@ -242,7 +244,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
         finally
         {
@@ -266,7 +268,7 @@ public class YtMusicController : ControllerBase
         {
             // 1. Artists the user actually listens to (Jellyfin play history, audio only).
             var playedArtists = new List<string>();
-            try
+            if (userId != Guid.Empty) try
             {
                 var query = new InternalItemsQuery
                 {
@@ -285,7 +287,9 @@ public class YtMusicController : ControllerBase
             catch (Exception error) { _logger.LogWarning(error, "feed: play history unavailable"); }
 
             // 2. Artists from recent online listens (persistent cache).
-            var recentItems = _yt.Store.Items(_yt.Store.Recent(30).Select(r => r.VideoId)).ToList();
+            var recentItems = userId == Guid.Empty
+                ? new List<YtItem>()
+                : _yt.Store.Items(_yt.Store.UserRecentList(userId.ToString("N"), 30).Select(r => r.VideoId)).ToList();
             var recentArtists = recentItems.Where(i => i.Artist.Length > 0).Select(i => FirstArtist(i.Artist)).ToList();
 
             var artists = playedArtists.Concat(recentArtists)
@@ -328,7 +332,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
     }
 
@@ -337,8 +341,16 @@ public class YtMusicController : ControllerBase
     /// <summary>Jellyfin user id of the caller, when the auth handler exposes one as a claim.</summary>
     private Guid CallerUserId()
     {
-        var value = User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-        return Guid.TryParse(value, out var id) ? id : Guid.Empty;
+        return CallerIdentity.UserId(User);
+    }
+
+    /// <summary>Generic 502: the upstream error (which names the source site) goes to the log only.</summary>
+    private IActionResult Upstream(Exception error)
+    {
+        if (error is OperationCanceledException && HttpContext.RequestAborted.IsCancellationRequested)
+            return new EmptyResult();
+        _logger.LogWarning("online music: {Path} failed: {Message}", Request.Path.Value, error.Message);
+        return StatusCode(502, new { message = error is TimeoutException ? "Source trop lente, réessayez." : "Source musicale indisponible." });
     }
 
     private static string FirstArtist(string artist) => artist.Split(',')[0].Split(" feat")[0].Trim();
@@ -357,7 +369,7 @@ public class YtMusicController : ControllerBase
     [HttpPost("download")]
     public async Task<IActionResult> Download([FromBody] DownloadRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request?.VideoId) || request.VideoId.Length > 32)
+        if (request == null || !CallerIdentity.IsVideoId(request.VideoId))
             return BadRequest(new { message = "videoId invalide" });
 
         var config = Plugin.Instance?.Configuration;
@@ -373,17 +385,20 @@ public class YtMusicController : ControllerBase
         catch (Exception error)
         {
             _logger.LogWarning("YT download metadata failed for {VideoId}: {Message}", request.VideoId, error.Message);
-            return StatusCode(502, new { message = "Métadonnées introuvables : " + error.Message });
+            return StatusCode(502, new { message = "Métadonnées introuvables." });
         }
         if (item.DownloadedPath.Length > 0 && System.IO.File.Exists(item.DownloadedPath))
         {
-            _yt.Touch(request.VideoId);
+            _yt.Touch(request.VideoId, CallerIdentity.HistoryKey(User));
             return Ok(new { downloaded = true, alreadyPresent = true, path = item.DownloadedPath, title = item.Title, artist = item.Artist });
         }
         var safeArtist = Sanitize(item.Artist);
         var safeTitle = Sanitize(item.Title);
-        var artistFolder = string.IsNullOrEmpty(safeArtist) ? "YouTube" : safeArtist;
-        var targetDir = Path.Combine(folder, artistFolder);
+        var artistFolder = string.IsNullOrEmpty(safeArtist) ? "Inconnu" : safeArtist;
+        var root = Path.GetFullPath(folder);
+        var targetDir = Path.GetFullPath(Path.Combine(root, artistFolder));
+        if (!targetDir.StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal))
+            return BadRequest(new { message = "Nom d'artiste invalide" });
         Directory.CreateDirectory(targetDir);
         var outTemplate = Path.Combine(targetDir, "%(title)s.%(ext)s");
 
@@ -409,7 +424,7 @@ public class YtMusicController : ControllerBase
         catch (Exception error)
         {
             _logger.LogWarning("YT download failed for {VideoId}: {Message}", request.VideoId, error.Message);
-            return StatusCode(502, new { message = error.Message });
+            return Upstream(error);
         }
         // yt-dlp prints the exact final path; never guess with "newest file in the folder".
         var file = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
@@ -419,13 +434,9 @@ public class YtMusicController : ControllerBase
         {
             // Already downloaded once: yt-dlp skips the write and prints nothing.
             var expected = Path.Combine(targetDir, safeTitle + ".m4a");
-            file = System.IO.File.Exists(expected)
-                ? expected
-                : Directory.GetFiles(targetDir, "*.m4a")
-                    .OrderByDescending(System.IO.File.GetLastWriteTimeUtc)
-                    .FirstOrDefault();
+            file = System.IO.File.Exists(expected) ? expected : null;
         }
-        if (string.IsNullOrEmpty(file))
+        if (string.IsNullOrEmpty(file) || !Path.GetFullPath(file).StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal))
             return StatusCode(502, new { message = "Téléchargement terminé mais aucun .m4a trouvé." });
 
         var folderItem = _library.FindByPath(targetDir, true)
@@ -446,7 +457,7 @@ public class YtMusicController : ControllerBase
         item.DownloadedPath = file;
         _yt.Store.PutItem(item);
         _yt.Store.Save();
-        _yt.Touch(request.VideoId);
+        _yt.Touch(request.VideoId, CallerIdentity.HistoryKey(User));
 
         _logger.LogInformation("YT download: {File} ({VideoId})", file, request.VideoId);
         return Ok(new { downloaded = true, path = file, title = item.Title, artist = item.Artist });
@@ -479,6 +490,8 @@ public class YtMusicController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(value)) return "";
         var invalid = Path.GetInvalidFileNameChars();
-        return new string(value.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        var clean = new string(value.Select(c => invalid.Contains(c) || char.IsControl(c) ? '_' : c).ToArray()).Trim().Trim('.').Trim();
+        if (clean.Length > 120) clean = clean[..120].Trim();
+        return clean is "" or "." or ".." ? "" : clean;
     }
 }

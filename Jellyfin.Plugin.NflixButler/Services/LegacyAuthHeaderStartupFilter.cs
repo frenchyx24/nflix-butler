@@ -29,8 +29,12 @@ public sealed class LegacyAuthHeaderStartupFilter : IStartupFilter
                     token = mb.ToString();
                 else if (context.Request.Query.TryGetValue("api_key", out var query) && !string.IsNullOrWhiteSpace(query.ToString()))
                     token = query.ToString();
+                else if (context.Request.Query.TryGetValue("ApiKey", out var apiKey) && !string.IsNullOrWhiteSpace(apiKey.ToString()))
+                    token = apiKey.ToString();
 
-                if (token != null)
+                // Only plain token characters: a quote or comma would let a crafted value inject
+                // extra MediaBrowser header fields (UserId, DeviceId…). The token is never logged.
+                if (token != null && token.Length <= 128 && System.Text.RegularExpressions.Regex.IsMatch(token, "^[A-Za-z0-9_-]+$"))
                     headers["Authorization"] = "MediaBrowser Token=\"" + token + "\"";
             }
 

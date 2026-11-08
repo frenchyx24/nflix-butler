@@ -90,6 +90,7 @@ public sealed class YtMusicService
     public async Task<List<YtHit>> SearchAsync(string query, int limit, CancellationToken ct)
     {
         query = query.Trim();
+        if (query.Length > 200) query = query[..200];
         if (query.Length == 0) return new List<YtHit>();
         limit = Math.Clamp(limit <= 0 ? 12 : limit, 1, 25);
         var normalized = YtStore.Normalize(query);
@@ -114,7 +115,7 @@ public sealed class YtMusicService
             list.Add("--flat-playlist");
             list.Add("--playlist-items");
             list.Add("1-" + (limit * 2));
-            list.Add("https://music.youtube.com/search?q=" + query);
+            list.Add("https://music.youtube.com/search?q=" + Uri.EscapeDataString(query));
         }, ct).ConfigureAwait(false);
 
         var parsed = ParseSearchJson(json, limit);
@@ -341,14 +342,19 @@ public sealed class YtMusicService
             list.Add("%(url)s");
             list.Add("https://www.youtube.com/watch?v=" + videoId);
         }, ct).ConfigureAwait(false)).Trim().Split('\n').LastOrDefault();
-        if (string.IsNullOrEmpty(url)) throw new InvalidOperationException("No audio stream for " + videoId);
-        return url;
+        if (string.IsNullOrEmpty(url)
+            || !Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !(uri.Host.EndsWith(".googlevideo.com", StringComparison.OrdinalIgnoreCase)
+                 || uri.Host.EndsWith(".youtube.com", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("Flux audio introuvable");
+        return uri.ToString();
     }
 
     /// <summary>Marks a track as seen (played/searched) in the persistent recents list.</summary>
-    public void Touch(string videoId)
+    public void Touch(string videoId, string userKey = "")
     {
-        _store.Touch(videoId);
+        _store.Touch(videoId, userKey);
         _store.Save();
     }
 }
