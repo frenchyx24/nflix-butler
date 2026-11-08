@@ -29,7 +29,6 @@ namespace Jellyfin.Plugin.NflixButler.Api;
 [Route("Plugins/NflixButler/yt")]
 public class YtMusicController : ControllerBase
 {
-    private static readonly ConcurrentDictionary<string, DateTime> LastSearch = new();
     private static readonly ConcurrentDictionary<string, (DateTime At, string Url)> UrlCache = new();
     private static readonly SemaphoreSlim StreamGate = new(4, 4);
     private static readonly HttpClient Http = new(new SocketsHttpHandler
@@ -83,12 +82,9 @@ public class YtMusicController : ControllerBase
     [HttpGet("search")]
     public async Task<IActionResult> Search([FromQuery] string q, [FromQuery] int limit = 12, CancellationToken ct = default)
     {
-        var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "?";
-        var now = DateTime.UtcNow;
-        if (LastSearch.TryGetValue(ip, out var last) && now - last < TimeSpan.FromSeconds(2))
-            return StatusCode(429, new { message = "Trop de recherches, attends 2 s." });
-        LastSearch[ip] = now;
-
+        // No per-IP throttle: behind the reverse proxy every user shares one address, and the
+        // client already debounces. YtMusicService serialises yt-dlp runs (2 at a time) and the
+        // 24 h search cache keeps the real load low.
         if (string.IsNullOrWhiteSpace(q))
             return Ok(new { results = Array.Empty<object>(), albums = Array.Empty<object>(), artists = Array.Empty<object>() });
 
