@@ -3,6 +3,7 @@ using Jellyfin.Plugin.NflixButler.Services;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.NflixButler;
@@ -30,5 +31,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
             var paths = provider.GetRequiredService<IApplicationPaths>();
             return new SyncStore(System.IO.Path.Combine(paths.PluginConfigurationsPath, "NflixButler"));
         });
+        // Re-accept the legacy X-Emby-Token header / api_key query param as a MediaBrowser token.
+        serviceCollection.AddSingleton<IStartupFilter, LegacyAuthHeaderStartupFilter>();
     }
 }
