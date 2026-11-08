@@ -33,5 +33,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         // Re-accept the legacy X-Emby-Token header / api_key query param as a MediaBrowser token.
         serviceCollection.AddSingleton<IStartupFilter, LegacyAuthHeaderStartupFilter>();
+        // Keep Seerr permission bitmasks inside int32 so the web Seerr plugin can parse its user list.
+        serviceCollection.AddHostedService<SeerrGuardService>();
     }
 }
