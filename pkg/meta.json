@@ -8,7 +8,7 @@
   "status": "Active",
   "autoUpdate": false,
   "targetAbi": "12.4.0.0",
-  "version": "0.4.2.0",
+  "version": "0.4.2.1",
   "changelog": "Bêta. Ne déplace ni ne renomme aucun fichier. Détecte les nouveautés, relit uniquement le dossier concerné, complète les fiches sans identifiant, sans image ou sans résumé, avec temporisation de 6 h pour ne jamais boucler. Diagnostic de la bibliothèque au démarrage. Routes réservées aux administrateurs. Comptes Deezer/Spotify durcis : import en POST, jetons Spotify rafraîchis automatiquement, jeton Deezer longue durée, correspondance artiste+titre insensible aux accents. Lecture audio : en-têtes de plage et type réels. Téléchargement : chemin exact du fichier, reprise d’un fichier déjà présent, état « déjà téléchargé » en une requête. Jellyfin 12.4 n’accepte que l’en-tête « Authorization: MediaBrowser … Token=… » : un middleware réécrit « X-Emby-Token » et « api_key » vers ce format, sinon Seerr/Horus ne retrouve plus les comptes Jellyfin (401). Un service de garde clampe automatiquement dans Seerr toute permission > int32 (comptes et defaultPermissions), pour que le parsing de la liste des utilisateurs côté plugin web ne casse plus jamais. Nouveau flag NflixWebTheme : injecte le thème web Nflix (fond noir, accents rouges, barre de navigation façon app) dans index.html — prévu pour l’app clone. Fil « Pour toi » personnalisé par utilisateur. Page d’administration dans sa propre fenêtre.",
-  "timestamp": "2026-11-08T18:10:00.0000000Z"
+  "timestamp": "2026-11-08T18:20:00.0000000Z"
 }

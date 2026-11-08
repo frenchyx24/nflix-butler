@@ -16,7 +16,7 @@ namespace Jellyfin.Plugin.NflixButler.Services;
  */
 public sealed class NflixWebThemeStartupFilter : IStartupFilter
 {
-    private const string ScriptTag = "<script src=\"/Plugins/NflixButler/web/theme.js\" defer></script>";
+    private const string ScriptTag = "<script src=\"/Plugins/NflixButler/theme.js\" defer></script>";
 
     private static bool Enabled() => Plugin.Instance?.Configuration.NflixWebTheme == true;
 
@@ -64,7 +64,7 @@ public sealed class NflixWebThemeStartupFilter : IStartupFilter
             using (var reader = new StreamReader(buffer, Encoding.UTF8, leaveOpen: true))
                 html = await reader.ReadToEndAsync();
 
-            if (html.Contains("/Plugins/NflixButler/web/theme.js", StringComparison.Ordinal))
+            if (html.Contains("/Plugins/NflixButler/theme.js", StringComparison.Ordinal))
             {
                 var unchanged = Encoding.UTF8.GetBytes(html);
                 context.Response.ContentLength = unchanged.Length;
