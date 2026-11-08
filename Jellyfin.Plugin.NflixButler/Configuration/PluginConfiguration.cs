@@ -56,6 +56,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Add a dashboard link to the Jellyfin web client at startup.</summary>
     public bool InjectWebDashboard { get; set; } = true;
 
+    /// <summary>
+    /// When true, inject the Nflix web theme (black/red, app-like bottom navigation) into the
+    /// Jellyfin web client's index.html. Off by default; enabled on the nflix-clone test app.
+    /// </summary>
+    public bool NflixWebTheme { get; set; } = false;
+
     /// <summary>OAuth redirect URI for streaming-account linking (must match the Deezer/Spotify app settings).</summary>
     public string SyncRedirectUri { get; set; } = "https://nflix.miracloud.fr/sync-callback";
 

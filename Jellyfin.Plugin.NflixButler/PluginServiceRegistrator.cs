@@ -33,6 +33,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         // Re-accept the legacy X-Emby-Token header / api_key query param as a MediaBrowser token.
         serviceCollection.AddSingleton<IStartupFilter, LegacyAuthHeaderStartupFilter>();
+        // Inject the Nflix web theme into the web client when NflixWebTheme is on (nflix-clone).
+        serviceCollection.AddSingleton<IStartupFilter, NflixWebThemeStartupFilter>();
         // Keep Seerr permission bitmasks inside int32 so the web Seerr plugin can parse its user list.
         serviceCollection.AddHostedService<SeerrGuardService>();
     }
