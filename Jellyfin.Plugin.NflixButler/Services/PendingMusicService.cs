@@ -141,6 +141,13 @@ public sealed class PendingMusicService : BackgroundService
         foreach (var track in snapshot)
         {
             ct.ThrowIfCancellationRequested();
+            // Playlist deleted by its owner: forget its pending tracks.
+            if (!Guid.TryParse(track.PlaylistId, out var owning) || _library.GetItemById(owning) == null)
+            {
+                lock (_gate) _items.RemoveAll(x => x.Id == track.Id);
+                changed = true;
+                continue;
+            }
             var local = SyncController.MatchLocal(_library, track.Title, track.Artist);
             if (local != null && Guid.TryParse(track.PlaylistId, out var pid) && Guid.TryParse(track.UserId, out var uid))
             {
@@ -307,7 +314,7 @@ public sealed class PendingMusicService : BackgroundService
                     {
                         "importPending" or "importing" => new Progress("Import sur le serveur", 100),
                         "failedPending" or "failed" => new Progress("Échec du téléchargement, nouvel essai", -1),
-                        _ when warn == "warning" && status != "downloading" => new Progress("Téléchargement bloqué", pct),
+                        _ when warn == "warning" && status != "downloading" => new Progress(pct >= 100 ? "Import bloqué, vérification en cours" : "Téléchargement bloqué", pct),
                         _ when status is "queued" or "delay" or "paused" => new Progress("En file de téléchargement", pct),
                         _ => new Progress("Téléchargement " + pct + " %" + (eta.Length > 0 && TimeSpan.TryParse(eta, out var t) ? " · " + (t.TotalMinutes >= 1 ? (int)t.TotalMinutes + " min" : "< 1 min") : ""), pct),
                     };
