@@ -181,6 +181,27 @@ public sealed class MusicLibraryService
         }
     }
 
+    /// <summary>Existing artist folder (music folder or the library root above it) with the same folded name.</summary>
+    internal static string? CanonicalArtist(string root, string primary)
+    {
+        var key = ArtistNames.Key(primary);
+        if (key.Length == 0) return null;
+        foreach (var dir in new[] { root, Path.GetDirectoryName(root) ?? "" })
+        {
+            try
+            {
+                if (dir.Length == 0 || !Directory.Exists(dir)) continue;
+                foreach (var sub in Directory.EnumerateDirectories(dir))
+                {
+                    var name = Path.GetFileName(sub);
+                    if (ArtistNames.Key(name) == key) return name;
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
     internal static string Safe(string value, string fallback)
     {
         if (string.IsNullOrWhiteSpace(value)) return fallback;
@@ -220,6 +241,10 @@ public sealed class MusicLibraryService
         if (track.Cover.Length == 0)
             track.Cover = await _catalog.FindCoverAsync(track.Artist, track.Title, track.Album, ct).ConfigureAwait(false);
 
+        // Same artist already in the library under another spelling (JAY Z / JAŸ-Z): reuse that name.
+        var primary = ArtistNames.Primary(track.Artist);
+        var canonical = CanonicalArtist(root, primary);
+        if (canonical != null && canonical != primary) track.Artist = canonical + track.Artist[Math.Min(primary.Length, track.Artist.Length)..];
         var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
         var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
         if (!albumDir.StartsWith(root + "/", StringComparison.Ordinal)) throw new InvalidOperationException("Chemin refusé.");
@@ -511,6 +536,10 @@ public sealed class MusicLibraryService
                 }
                 if (track.Cover.Length == 0)
                     track.Cover = await _catalog.FindCoverAsync(track.Artist, track.Title, track.Album, ct).ConfigureAwait(false);
+                // Same artist already in the library under another spelling (JAY Z / JAŸ-Z): reuse that name.
+                var primaryName = ArtistNames.Primary(track.Artist);
+                var canonicalName = CanonicalArtist(root, primaryName);
+                if (canonicalName != null && canonicalName != primaryName) track.Artist = canonicalName + track.Artist[Math.Min(primaryName.Length, track.Artist.Length)..];
                 var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
                 var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
                 if (!albumDir.StartsWith(root + "/", StringComparison.Ordinal)) continue;
