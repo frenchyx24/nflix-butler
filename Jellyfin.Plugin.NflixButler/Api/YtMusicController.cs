@@ -271,7 +271,7 @@ public class YtMusicController : ControllerBase
                 // Expired or refused signed URL: forget it so the next try resolves a fresh one.
                 UrlCache.TryRemove(videoId, out _);
                 response.Dispose();
-                return controller.StatusCode(502, new { message = "Source audio indisponible (" + (int)response.StatusCode + ")." });
+                return controller.StatusCode(400, new { message = "Source audio indisponible (" + (int)response.StatusCode + ")." });
             }
 
             Response.StatusCode = (int)response.StatusCode;
@@ -294,7 +294,7 @@ public class YtMusicController : ControllerBase
         }
         catch (Exception)
         {
-            return controller.StatusCode(502, new { message = "Source musicale indisponible." });
+            return controller.StatusCode(400, new { message = "Source musicale indisponible." });
         }
         finally
         {
@@ -400,7 +400,7 @@ public class YtMusicController : ControllerBase
         if (error is OperationCanceledException && HttpContext.RequestAborted.IsCancellationRequested)
             return new EmptyResult();
         _logger.LogWarning("online music: {Path} failed: {Message}", Request.Path.Value, error.Message);
-        return StatusCode(502, new { message = error is TimeoutException ? "Source trop lente, réessayez." : "Source musicale indisponible." });
+        return StatusCode(400, new { message = error is TimeoutException ? "Source trop lente, réessayez." : "Source musicale indisponible." });
     }
 
     private static string FirstArtist(string artist) => artist.Split(',')[0].Split(" feat")[0].Trim();
@@ -435,7 +435,7 @@ public class YtMusicController : ControllerBase
         catch (Exception error)
         {
             _logger.LogWarning("YT download metadata failed for {VideoId}: {Message}", request.VideoId, error.Message);
-            return StatusCode(502, new { message = "Métadonnées introuvables." });
+            return StatusCode(400, new { message = "Métadonnées introuvables." });
         }
         if (item.DownloadedPath.Length > 0 && System.IO.File.Exists(item.DownloadedPath))
         {

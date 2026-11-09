@@ -136,7 +136,7 @@ public class SyncController : ControllerBase
     {
         if (IsOtherUser(request?.UserId)) return Forbid();
         if (string.IsNullOrWhiteSpace(Config.GoogleClientId) || string.IsNullOrWhiteSpace(Config.GoogleClientSecret))
-            return StatusCode(412, new { message = "Compte Google non configuré côté serveur (GoogleClientId/GoogleClientSecret)." });
+            return StatusCode(412, new { message = "Compte musique non configuré côté serveur." });
         try
         {
             using var res = await Http.PostAsync("https://oauth2.googleapis.com/device/code", new FormUrlEncodedContent(new Dictionary<string, string>
@@ -145,7 +145,12 @@ public class SyncController : ControllerBase
                 ["scope"] = GoogleScope,
             }), ct);
             var text = await res.Content.ReadAsStringAsync(ct);
-            if (!res.IsSuccessStatusCode) return StatusCode(502, new { message = "Google a refusé la demande (" + (int)res.StatusCode + ")." });
+            if (!res.IsSuccessStatusCode)
+            {
+                // 4xx, not 502: the CDN replaces a 502 body with its own error page, the app would lose this message.
+                _logger.LogWarning("sync: device code refused by upstream, status {Status}", (int)res.StatusCode);
+                return StatusCode(400, new { message = "Le service de musique en ligne a refusé la demande." });
+            }
             using var doc = JsonDocument.Parse(text);
             var root = doc.RootElement;
             var deviceCode = root.GetProperty("device_code").GetString() ?? "";
@@ -162,7 +167,7 @@ public class SyncController : ControllerBase
         catch (Exception error)
         {
             _logger.LogWarning("sync: google start failed: {Message}", error.Message);
-            return StatusCode(502, new { message = "Google injoignable." });
+            return StatusCode(400, new { message = "Service de musique en ligne injoignable." });
         }
     }
 
@@ -222,7 +227,7 @@ public class SyncController : ControllerBase
         catch (Exception error)
         {
             _logger.LogWarning("sync: google poll failed: {Message}", error.Message);
-            return StatusCode(502, new { message = "Google injoignable." });
+            return StatusCode(400, new { message = "Service de musique en ligne injoignable." });
         }
     }
 
@@ -258,7 +263,7 @@ public class SyncController : ControllerBase
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
         using var res = await Http.SendAsync(req, ct);
         var text = await res.Content.ReadAsStringAsync(ct);
-        if (!res.IsSuccessStatusCode) throw new InvalidOperationException("Google " + (int)res.StatusCode);
+        if (!res.IsSuccessStatusCode) throw new InvalidOperationException("service en ligne a répondu " + (int)res.StatusCode);
         return text;
     }
 
@@ -300,7 +305,7 @@ public class SyncController : ControllerBase
                     .Where(p => p.Length == 2)
                     .ToDictionary(p => p[0], p => p[1]);
                 if (!parts.TryGetValue("access_token", out var token) || string.IsNullOrWhiteSpace(token))
-                    return StatusCode(502, new { message = "Deezer a refusé le code." });
+                    return StatusCode(400, new { message = "Deezer a refusé le code." });
                 // With the offline_access permission Deezer returns no "expires": the token does not expire.
                 var expires = parts.TryGetValue("expires", out var exp) && int.TryParse(exp, out var e) ? e : 0;
                 var profile = await DeezerGet("/user", token, ct);
@@ -329,7 +334,7 @@ public class SyncController : ControllerBase
                     Convert.ToBase64String(Encoding.UTF8.GetBytes(Config.SpotifyClientId + ":" + Config.SpotifyClientSecret)));
                 var json = await Http.SendAsync(req, ct);
                 var text = await json.Content.ReadAsStringAsync(ct);
-                if (!json.IsSuccessStatusCode) return StatusCode(502, new { message = "Spotify a refusé le code (" + (int)json.StatusCode + ")." });
+                if (!json.IsSuccessStatusCode) return StatusCode(400, new { message = "Spotify a refusé le code (" + (int)json.StatusCode + ")." });
                 using var doc = JsonDocument.Parse(text);
                 var root = doc.RootElement;
                 var profileReq = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/me");
@@ -356,7 +361,8 @@ public class SyncController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            _logger.LogWarning("sync: upstream call failed: {Message}", error.Message);
+            return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
     }
 
@@ -435,7 +441,7 @@ public class SyncController : ControllerBase
                 var text = await SpotifyGetAsync(userId ?? "", "/v1/me/playlists?limit=50", account, ct);
                 using var doc = JsonDocument.Parse(text);
                 if (!doc.RootElement.TryGetProperty("items", out var entries))
-                    return StatusCode(502, new { message = "Réponse Spotify inattendue." });
+                    return StatusCode(400, new { message = "Réponse Spotify inattendue." });
                 var items = entries.EnumerateArray().Select(p => new
                 {
                     id = p.GetProperty("id").GetString() ?? "",
@@ -447,7 +453,8 @@ public class SyncController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            _logger.LogWarning("sync: upstream call failed: {Message}", error.Message);
+            return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
     }
 
@@ -533,7 +540,8 @@ public class SyncController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            _logger.LogWarning("sync: upstream call failed: {Message}", error.Message);
+            return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
 
         var matched = new List<object>();
@@ -658,7 +666,8 @@ public class SyncController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            _logger.LogWarning("sync: upstream call failed: {Message}", error.Message);
+            return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
     }
 
@@ -701,7 +710,8 @@ public class SyncController : ControllerBase
         }
         catch (Exception error)
         {
-            return StatusCode(502, new { message = error.Message });
+            _logger.LogWarning("sync: upstream call failed: {Message}", error.Message);
+            return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
     }
 

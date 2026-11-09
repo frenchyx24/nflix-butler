@@ -96,7 +96,7 @@ public class MusicController : ControllerBase
         if (error is OperationCanceledException && HttpContext.RequestAborted.IsCancellationRequested)
             return new EmptyResult();
         _logger.LogWarning("music catalogue: {Path} failed: {Message}", Request.Path.Value, error.Message);
-        return StatusCode(502, new { message = "Catalogue musical indisponible, réessayez." });
+        return StatusCode(400, new { message = "Catalogue musical indisponible, réessayez." });
     }
 
     private bool MayDownload() =>
