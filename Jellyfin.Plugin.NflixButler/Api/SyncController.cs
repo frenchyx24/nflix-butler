@@ -140,16 +140,19 @@ public class SyncController : ControllerBase
     }
 
     [HttpGet("pending")]
-    public IActionResult GetPending([FromQuery] string userId, [FromQuery] string playlistId)
+    public async Task<IActionResult> GetPending([FromQuery] string userId, [FromQuery] string playlistId, CancellationToken ct)
     {
         if (IsOtherUser(userId)) return Forbid();
         if (!Guid.TryParse(playlistId, out var playlistGuid)) return BadRequest(new { message = "playlistId invalide" });
         var owner = Guid.Parse(userId).ToString("N");
         var list = _pending.ForPlaylist(playlistGuid.ToString("N")).Where(x => x.UserId == owner).ToList();
+        var status = await _pending.StatusAsync(list, ct);
         return Ok(new
         {
             tracks = list.Select(t => new
             {
+                status = status.TryGetValue(t.Id, out var st) ? st.Label : "",
+                progress = status.TryGetValue(t.Id, out var sp) ? sp.Percent : -1,
                 id = t.Id,
                 title = t.Title,
                 artist = t.Artist,

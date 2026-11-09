@@ -40,6 +40,7 @@ public sealed class PendingTrack
     public int Tries { get; set; }
     public DateTime AddedUtc { get; set; } = DateTime.UtcNow;
     public DateTime NextUtc { get; set; } = DateTime.MinValue;
+    public DateTime RequestedUtc { get; set; }
 }
 
 /// <summary>
@@ -270,9 +271,85 @@ public sealed class PendingMusicService : BackgroundService
         }
         track.LidarrAlbumId = albumId;
         track.State = "requested";
+        track.RequestedUtc = DateTime.UtcNow;
         track.NextUtc = DateTime.MaxValue;
         requestedAlbums.Add(albumId);
         _logger.LogInformation("pending: album « {Album} » demandé à Lidarr pour « {Title} »", pick["title"]?.GetValue<string>(), track.Title);
+    }
+
+    public sealed record Progress(string Label, int Percent);
+
+    private Dictionary<int, Progress> _queueCache = new();
+    private DateTime _queueAt = DateTime.MinValue;
+    private readonly Dictionary<int, (DateTime At, int Files, int Total)> _albumStats = new();
+
+    /// <summary>Human status of each pending track, from the Lidarr download queue (cached 10 s).</summary>
+    public async Task<Dictionary<string, Progress>> StatusAsync(List<PendingTrack> tracks, CancellationToken ct)
+    {
+        var result = new Dictionary<string, Progress>();
+        if (LidarrConfigured && tracks.Any(t => t.State == "requested") && DateTime.UtcNow - _queueAt > TimeSpan.FromSeconds(10))
+        {
+            var map = new Dictionary<int, Progress>();
+            try
+            {
+                var queue = await LidarrAsync(HttpMethod.Get, "queue?pageSize=200", ct).ConfigureAwait(false);
+                foreach (var r in (queue?["records"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
+                {
+                    var albumId = r["albumId"]?.GetValue<int>() ?? 0;
+                    if (albumId == 0) continue;
+                    double size = r["size"]?.GetValue<double>() ?? 0, left = r["sizeleft"]?.GetValue<double>() ?? 0;
+                    var pct = size > 0 ? (int)Math.Round(100 * (size - left) / size) : 0;
+                    var tracked = r["trackedDownloadState"]?.GetValue<string>() ?? "";
+                    var status = (r["status"]?.GetValue<string>() ?? "").ToLowerInvariant();
+                    var warn = (r["trackedDownloadStatus"]?.GetValue<string>() ?? "").ToLowerInvariant();
+                    var eta = r["timeleft"]?.GetValue<string>() ?? "";
+                    Progress p = tracked switch
+                    {
+                        "importPending" or "importing" => new Progress("Import sur le serveur", 100),
+                        "failedPending" or "failed" => new Progress("Échec du téléchargement, nouvel essai", -1),
+                        _ when warn == "warning" && status != "downloading" => new Progress("Téléchargement bloqué", pct),
+                        _ when status is "queued" or "delay" or "paused" => new Progress("En file de téléchargement", pct),
+                        _ => new Progress("Téléchargement " + pct + " %" + (eta.Length > 0 && TimeSpan.TryParse(eta, out var t) ? " · " + (t.TotalMinutes >= 1 ? (int)t.TotalMinutes + " min" : "< 1 min") : ""), pct),
+                    };
+                    if (!map.TryGetValue(albumId, out var prev) || p.Percent > prev.Percent) map[albumId] = p;
+                }
+                _queueCache = map;
+                _queueAt = DateTime.UtcNow;
+            }
+            catch (Exception error) when (error is not OperationCanceledException) { _logger.LogDebug("pending: queue read failed: {Message}", error.Message); }
+        }
+        foreach (var t in tracks)
+        {
+            if (t.State == "requested" && _queueCache.TryGetValue(t.LidarrAlbumId, out var q)) { result[t.Id] = q; continue; }
+            if (t.State == "requested" && t.LidarrAlbumId > 0)
+            {
+                var files = await AlbumFilesAsync(t.LidarrAlbumId, ct).ConfigureAwait(false);
+                if (files > 0) { result[t.Id] = new Progress("Ajout à la bibliothèque", 100); continue; }
+            }
+            result[t.Id] = t.State switch
+            {
+                "requested" => DateTime.UtcNow - t.RequestedUtc < TimeSpan.FromMinutes(30) || t.RequestedUtc == default
+                    ? new Progress("Recherche d'une source", -1)
+                    : new Progress("Aucune source pour l'instant", -1),
+                "notfound" => new Progress("Lecture en ligne uniquement", -1),
+                "disabled" => new Progress("Lecture en ligne uniquement", -1),
+                _ => new Progress(t.Tries > 0 ? "Nouvel essai bientôt" : "En préparation", -1),
+            };
+        }
+        return result;
+    }
+
+    private async Task<int> AlbumFilesAsync(int albumId, CancellationToken ct)
+    {
+        lock (_albumStats) { if (_albumStats.TryGetValue(albumId, out var c) && DateTime.UtcNow - c.At < TimeSpan.FromMinutes(1)) return c.Files; }
+        try
+        {
+            var album = await LidarrAsync(HttpMethod.Get, "album/" + albumId, ct).ConfigureAwait(false);
+            var files = album?["statistics"]?["trackFileCount"]?.GetValue<int>() ?? 0;
+            lock (_albumStats) _albumStats[albumId] = (DateTime.UtcNow, files, 0);
+            return files;
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { return 0; }
     }
 
     private static async Task<(string Path, int Quality, int Metadata)> RootFolderAsync(CancellationToken ct)
