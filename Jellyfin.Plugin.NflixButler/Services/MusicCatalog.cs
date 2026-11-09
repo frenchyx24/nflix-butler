@@ -104,6 +104,109 @@ public sealed class MusicCatalog
     private static string Cover(JsonElement album) =>
         Str(album, "cover_xl") is { Length: > 0 } xl ? xl : Str(album, "cover_big");
 
+    private static readonly HttpClient CoverHttp = new() { Timeout = TimeSpan.FromSeconds(12) };
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, string Url)> CoverCache = new();
+
+    /** Outbound image hosts the plugin may fetch from. No video still host: covers stay square. */
+    public static bool ImageHostAllowed(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps) return false;
+        var host = uri.Host;
+        static bool At(string host, string domain) =>
+            host.Equals(domain, StringComparison.OrdinalIgnoreCase) || host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase);
+        return At(host, "dzcdn.net") || At(host, "deezer.com") || At(host, "mzstatic.com")
+            || At(host, "coverartarchive.org") || At(host, "archive.org")
+            || At(host, "googleusercontent.com") || At(host, "ggpht.com");
+    }
+
+    /**
+     * Square cover for an artist + title, with fallbacks: Deezer (cover_xl), iTunes
+     * (artworkUrl100 upgraded to 1000x1000) then Cover Art Archive (front-1200). Cached; negative
+     * results for a day so a missing cover does not hammer the upstreams on every page.
+     */
+    public async Task<string> FindCoverAsync(string artist, string title, string album, CancellationToken ct)
+    {
+        var primary = ArtistNames.Primary(artist);
+        var clean = LyricsService.CleanTitle(title);
+        if (clean.Length == 0) return "";
+        var key = ArtistNames.Key(primary) + "|" + Norm(clean);
+        if (CoverCache.TryGetValue(key, out var hit))
+        {
+            var ttl = hit.Url.Length > 0 ? TimeSpan.FromDays(30) : TimeSpan.FromDays(1);
+            if (DateTime.UtcNow - hit.At < ttl) return hit.Url;
+        }
+        var cover = "";
+        try
+        {
+            var track = await FindTrackAsync(artist, title, ct).ConfigureAwait(false);
+            if (track != null && ImageHostAllowed(track.Cover)) cover = track.Cover;
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { }
+        if (cover.Length == 0) cover = await ItunesCoverAsync(primary, clean, ct).ConfigureAwait(false);
+        if (cover.Length == 0) cover = await CoverArtCoverAsync(primary, clean, ct).ConfigureAwait(false);
+        if (CoverCache.Count > 5000) CoverCache.Clear();
+        CoverCache[key] = (DateTime.UtcNow, cover);
+        return cover;
+    }
+
+    private static async Task<string> ItunesCoverAsync(string artist, string title, CancellationToken ct)
+    {
+        try
+        {
+            var term = Uri.EscapeDataString((artist + " " + title).Trim());
+            var text = await CoverHttp.GetStringAsync("https://itunes.apple.com/search?term=" + term + "&entity=song&limit=5&country=FR", ct).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(text);
+            if (!doc.RootElement.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array) return "";
+            foreach (var item in results.EnumerateArray())
+            {
+                var art = Str(item, "artworkUrl100");
+                if (art.Length == 0) continue;
+                var big = art.Replace("100x100bb", "1000x1000bb", StringComparison.Ordinal).Replace("100x100", "1000x1000", StringComparison.Ordinal);
+                if (ImageHostAllowed(big)) return big;
+            }
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { }
+        return "";
+    }
+
+    private static async Task<string> CoverArtCoverAsync(string artist, string title, CancellationToken ct)
+    {
+        try
+        {
+            var query = Uri.EscapeDataString("artist:\"" + artist.Replace("\"", "") + "\" AND recording:\"" + title.Replace("\"", "") + "\"");
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://musicbrainz.org/ws/2/recording?query=" + query + "&fmt=json&limit=5");
+            request.Headers.UserAgent.ParseAdd("NflixButler/0.6.0.3 (+https://nflix.miracloud.fr)");
+            using var response = await CoverHttp.SendAsync(request, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return "";
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+            if (!doc.RootElement.TryGetProperty("recordings", out var recordings) || recordings.ValueKind != JsonValueKind.Array) return "";
+            var releases = new List<string>();
+            foreach (var recording in recordings.EnumerateArray())
+            {
+                if (!recording.TryGetProperty("releases", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+                foreach (var release in list.EnumerateArray())
+                {
+                    var id = Str(release, "id");
+                    if (id.Length > 0 && !releases.Contains(id)) releases.Add(id);
+                }
+            }
+            foreach (var id in releases.Take(3))
+            {
+                var url = "https://coverartarchive.org/release/" + id + "/front-1200";
+                using var head = new HttpRequestMessage(HttpMethod.Head, url);
+                head.Headers.UserAgent.ParseAdd("NflixButler/0.6.0.3 (+https://nflix.miracloud.fr)");
+                try
+                {
+                    using var check = await CoverHttp.SendAsync(head, ct).ConfigureAwait(false);
+                    if (check.IsSuccessStatusCode && ImageHostAllowed(url)) return url;
+                }
+                catch (Exception error) when (error is not OperationCanceledException) { }
+            }
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { }
+        return "";
+    }
+
     private static CatalogTrack Track(JsonElement t, JsonElement? albumOverride = null)
     {
         var album = albumOverride ?? Obj(t, "album");

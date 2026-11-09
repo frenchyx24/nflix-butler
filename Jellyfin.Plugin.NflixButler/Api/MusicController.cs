@@ -405,6 +405,26 @@ public class MusicController : ControllerBase
     }
 
     /**
+     * Square cover for an artist + title, with the catalogue fallbacks (Deezer, iTunes, Cover Art
+     * Archive). Used by the app for tracks that have no cover yet; cached server-side.
+     */
+    [HttpGet("cover")]
+    public async Task<IActionResult> Cover([FromQuery] string? artist, [FromQuery] string? title, [FromQuery] string? album, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) || artist.Length > 300 || title.Length > 300)
+            return BadRequest(new { message = "artist et title requis" });
+        try
+        {
+            var cover = await _catalog.FindCoverAsync(artist, title, album ?? "", ct);
+            return Ok(new { cover });
+        }
+        catch (Exception error)
+        {
+            return Upstream(error);
+        }
+    }
+
+    /**
      * Artist pictures for library artists that have none: names separated by "|", exact name
      * match only. Cached forever server-side; at most 20 new lookups per call (catalogue rate).
      */

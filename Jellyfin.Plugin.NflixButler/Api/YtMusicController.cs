@@ -69,11 +69,14 @@ public class YtMusicController : ControllerBase
         thumbnail = h.VideoId.Length > 0 ? CoverOf(_yt.Store.Item(h.VideoId), h.VideoId) : null,
     };
 
-    /// <summary>Square catalogue cover when known, the video still otherwise.</summary>
-    private static string CoverOf(YtItem? item, string videoId) =>
-        item != null && item.Cover.StartsWith("https://", StringComparison.Ordinal) ? item.Cover
-        : item != null && item.Thumbnail.Length > 0 ? item.Thumbnail
-        : "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+    /// <summary>Square catalogue cover when known, a square platform picture otherwise: never a video still.</summary>
+    private static string? CoverOf(YtItem? item, string videoId) =>
+        item != null && ImageUrl(item.Cover) ? item.Cover
+        : item != null && ImageUrl(item.Thumbnail) ? item.Thumbnail
+        : null;
+
+    private static bool ImageUrl(string url) =>
+        url.StartsWith("https://", StringComparison.Ordinal) && !IsVideoStill(url);
 
     /** Video stills are never shown: a track either has a square catalogue cover or no image. */
     private static bool IsVideoStill(string url) =>
@@ -451,6 +454,8 @@ public class YtMusicController : ControllerBase
             Album = item.Album,
             Duration = item.Duration,
         };
+        if (track.Cover.Length == 0)
+            track.Cover = await _catalog.FindCoverAsync(track.Artist, track.Title, track.Album, ct);
         string file;
         try
         {
@@ -471,19 +476,33 @@ public class YtMusicController : ControllerBase
         return Ok(new { downloaded = true, path = file, title = track.Title, artist = track.Artist });
     }
 
-    /// <summary>Finds the square album cover of an online track once (catalogue), "-" when none.</summary>
+    /// <summary>Finds the square album cover of an online track once, then caches it in the store.</summary>
     private async Task ResolveCoverAsync(YtItem item, CancellationToken ct)
     {
         if (item.Cover.Length > 0 || item.Title.Length == 0) return;
         try
         {
-            var match = await _catalog.FindTrackAsync(item.Artist, item.Title, ct);
-            item.Cover = match != null && match.Cover.StartsWith("https://", StringComparison.Ordinal) ? match.Cover : "-";
-            if (match != null && item.Album.Length == 0) item.Album = match.Album;
+            var cover = await _catalog.FindCoverAsync(item.Artist, item.Title, item.Album, ct);
+            if (cover.Length == 0 && item.Thumbnail.Contains("googleusercontent.com", StringComparison.OrdinalIgnoreCase))
+                cover = SquarePicture(item.Thumbnail);
+            item.Cover = cover.Length > 0 ? cover : "-";
+            if (item.Album.Length == 0)
+            {
+                var match = await _catalog.FindTrackAsync(item.Artist, item.Title, ct);
+                if (match != null) item.Album = match.Album;
+            }
             _yt.Store.PutItem(item);
             _yt.Store.Save();
         }
         catch (Exception error) when (error is not OperationCanceledException) { }
+    }
+
+    /// <summary>Re-asks a googleusercontent picture at 1000x1000; platform album art is square.</summary>
+    private static string SquarePicture(string url)
+    {
+        var cut = url.IndexOf('=');
+        var baseUrl = cut > 0 ? url[..cut] : url;
+        return baseUrl + "=w1000-h1000-l90-rj";
     }
 
     private static async Task<string> YtMusicServiceRun(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct)

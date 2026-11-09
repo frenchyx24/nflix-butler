@@ -217,6 +217,8 @@ public sealed class MusicLibraryService
             }
             catch { }
         }
+        if (track.Cover.Length == 0)
+            track.Cover = await _catalog.FindCoverAsync(track.Artist, track.Title, track.Album, ct).ConfigureAwait(false);
 
         var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
         var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
@@ -361,12 +363,15 @@ public sealed class MusicLibraryService
 
     private static async Task SaveImageAsync(string url, string path, CancellationToken ct)
     {
-        var uri = new Uri(url);
-        // Covers only come from the catalogue CDN.
-        if (!(uri.Host.EndsWith(".dzcdn.net", StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith(".deezer.com", StringComparison.OrdinalIgnoreCase))) return;
+        // Square cover hosts only: catalogue CDN, Apple artwork, Cover Art Archive, square platform art.
+        if (!MusicCatalog.ImageHostAllowed(url)) return;
         try
         {
-            var bytes = await Http.GetByteArrayAsync(uri, ct).ConfigureAwait(false);
+            using var response = await Http.GetAsync(url, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return;
+            var uri = response.RequestMessage?.RequestUri ?? new Uri(url);
+            if (!MusicCatalog.ImageHostAllowed(uri.ToString())) return;
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
             if (bytes.Length < 512 || bytes.Length > 15_000_000) return;
             var temp = path + ".tmp";
             await File.WriteAllBytesAsync(temp, bytes, ct).ConfigureAwait(false);
@@ -504,6 +509,8 @@ public sealed class MusicLibraryService
                     }
                     catch { }
                 }
+                if (track.Cover.Length == 0)
+                    track.Cover = await _catalog.FindCoverAsync(track.Artist, track.Title, track.Album, ct).ConfigureAwait(false);
                 var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
                 var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
                 if (!albumDir.StartsWith(root + "/", StringComparison.Ordinal)) continue;
