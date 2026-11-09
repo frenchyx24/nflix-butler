@@ -18,11 +18,9 @@ if [ "$MODE" = all ] || [ "$MODE" = feed ]; then
   echo " ytimg in feed: $(grep -c 'ytimg' /tmp/nm.body)"
 fi
 if [ "$MODE" = all ] || [ "$MODE" = lyrics ]; then
-  for t in "Stromae|Alors on danse" "Angèle|Balance ton quoi" "Indila|Dernière danse" "Daft Punk|Get Lucky (feat. Pharrell Williams and Nile Rodgers)" "Adele|Hello" "Billie Eilish|bad guy" "Tyler, The Creator|See You Again" "Aya Nakamura|Djadja"; do
-    AR=$(printf '%s' "${t%%|*}" | jq -sRr @uri 2>/dev/null || python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "${t%%|*}")
-    TI=$(printf '%s' "${t#*|}" | jq -sRr @uri 2>/dev/null || python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "${t#*|}")
-    C=$(code -H "$A" "$P/music/lyrics?artist=$AR&title=$TI")
-    echo "lyrics $t: $C synced=$(grep -o '"synced":[a-z]*' /tmp/nm.body | cut -d: -f2) lines=$(grep -o '"startMs"' /tmp/nm.body | wc -l) first=$(grep -o '"text":"[^"]\+"' /tmp/nm.body | sed -n 2p | cut -c1-50)"
+  for t in "Stromae|Alors on danse" "Angèle|Balance ton quoi" "Indila|Dernière danse" "Daft Punk|Get Lucky (feat. Pharrell Williams and Nile Rodgers)" "Adele|Hello" "Billie Eilish|bad guy" "Tyler, The Creator|See You Again" "Aya Nakamura|Djadja" "Ariana Grande|kiss me" "Orelsan|La pluie"; do
+    C=$(code -G -H "$A" --data-urlencode "artist=${t%%|*}" --data-urlencode "title=${t#*|}" "$P/music/lyrics")
+    echo "lyrics $t: $C synced=$(grep -o '"synced":[a-z]*' /tmp/nm.body | cut -d: -f2) lines=$(grep -o '"startMs"' /tmp/nm.body | wc -l) first=$(grep -o '"text":"[^"]\+"' /tmp/nm.body | sed -n 3p | cut -c1-60)"
   done
   echo "lyrics bad: $(code -H "$A" "$P/music/lyrics?artist=&title=x")"
 fi

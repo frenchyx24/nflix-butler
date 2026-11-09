@@ -302,7 +302,16 @@ public class MusicController : ControllerBase
             if (mixes.Count > 0)
                 sections.Add(new { key = "mixes", title = "Vos mix du jour", subtitle = "Basés sur vos artistes", type = "mixes", mixes });
 
-            var newAlbums = await Safe(releases);
+            // Latest releases of the user's own artists first, then the general ones.
+            var ownLatest = new List<CatalogAlbum>();
+            var minYear = (DateTime.UtcNow.Year - 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var a in artists.Take(4))
+            {
+                var albums = await Safe(_catalog.ArtistAlbumsAsync(a.Id, ct));
+                if (albums != null) ownLatest.AddRange(albums.Where(al => string.CompareOrdinal(al.Year, minYear) >= 0).Take(2));
+            }
+            var newAlbums = ownLatest.OrderByDescending(al => al.Year).Concat(await Safe(releases) ?? new List<CatalogAlbum>())
+                .GroupBy(al => al.Id).Select(g => g.First()).Take(20).ToList();
             if (newAlbums is { Count: > 0 })
                 sections.Add(new { key = "releases", title = "Nouveautés", subtitle = "Les sorties du moment", type = "albums", albums = newAlbums.Select(AlbumJson) });
 

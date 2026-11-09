@@ -263,6 +263,10 @@ public sealed class MusicCatalog
     public async Task<List<CatalogAlbum>> NewReleasesAsync(int limit, CancellationToken ct)
     {
         var root = await GetAsync("editorial/0/releases?limit=" + Math.Clamp(limit, 1, 50), TimeSpan.FromHours(6), ct).ConfigureAwait(false);
+        var list = Data(root).Select(a => Album(a)).Where(a => a.Id.Length > 0).ToList();
+        if (list.Count > 0) return list;
+        // The editorial list is sometimes empty: fall back to the album chart.
+        root = await GetAsync("chart/0/albums?limit=" + Math.Clamp(limit, 1, 50), TimeSpan.FromHours(6), ct).ConfigureAwait(false);
         return Data(root).Select(a => Album(a)).Where(a => a.Id.Length > 0).ToList();
     }
 
