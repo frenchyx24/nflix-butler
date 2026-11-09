@@ -44,9 +44,13 @@ public class YtMusicController : ControllerBase
     private readonly IDirectoryService _directoryService;
     private readonly IUserManager _users;
     private readonly ILogger<YtMusicController> _logger;
+    private readonly MusicCatalog _catalog;
+    private readonly MusicLibraryService _music;
 
-    public YtMusicController(YtMusicService yt, IProviderManager providers, ILibraryManager library, IDirectoryService directoryService, IUserManager users, ILogger<YtMusicController> logger)
+    public YtMusicController(YtMusicService yt, IProviderManager providers, ILibraryManager library, IDirectoryService directoryService, IUserManager users, MusicCatalog catalog, MusicLibraryService music, ILogger<YtMusicController> logger)
     {
+        _catalog = catalog;
+        _music = music;
         _yt = yt;
         _providers = providers;
         _library = library;
@@ -55,15 +59,21 @@ public class YtMusicController : ControllerBase
         _logger = logger;
     }
 
-    private static object HitJson(YtHit h) => new
+    private object HitJson(YtHit h) => new
     {
         kind = h.Kind,
         videoId = h.VideoId,
         browseId = h.BrowseId,
         title = h.Title,
         subtitle = h.Subtitle,
-        thumbnail = h.VideoId.Length > 0 ? "https://i.ytimg.com/vi/" + h.VideoId + "/hqdefault.jpg" : null,
+        thumbnail = h.VideoId.Length > 0 ? CoverOf(_yt.Store.Item(h.VideoId), h.VideoId) : null,
     };
+
+    /// <summary>Square catalogue cover when known, the video still otherwise.</summary>
+    private static string CoverOf(YtItem? item, string videoId) =>
+        item != null && item.Cover.StartsWith("https://", StringComparison.Ordinal) ? item.Cover
+        : item != null && item.Thumbnail.Length > 0 ? item.Thumbnail
+        : "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
 
     private static object ItemJson(YtItem i) => new
     {
@@ -75,7 +85,7 @@ public class YtMusicController : ControllerBase
         channelId = i.ChannelId,
         channelTitle = i.ChannelTitle,
         duration = i.Duration,
-        thumbnail = i.Thumbnail,
+        thumbnail = CoverOf(i, i.VideoId),
         downloaded = i.DownloadedPath.Length > 0,
     };
 
@@ -114,6 +124,7 @@ public class YtMusicController : ControllerBase
         try
         {
             var item = await _yt.InfoAsync(videoId, ct);
+            await ResolveCoverAsync(item, ct);
             return Ok(ItemJson(item));
         }
         catch (Exception error)
@@ -336,7 +347,7 @@ public class YtMusicController : ControllerBase
                         browseId = "",
                         title = i.Title,
                         subtitle = i.Artist,
-                        thumbnail = i.Thumbnail.Length > 0 ? i.Thumbnail : "https://i.ytimg.com/vi/" + i.VideoId + "/hqdefault.jpg",
+                        thumbnail = CoverOf(i, i.VideoId),
                     }),
                 });
             }
@@ -406,75 +417,51 @@ public class YtMusicController : ControllerBase
             _yt.Touch(request.VideoId, CallerIdentity.HistoryKey(User));
             return Ok(new { downloaded = true, alreadyPresent = true, path = item.DownloadedPath, title = item.Title, artist = item.Artist });
         }
-        var safeArtist = Sanitize(item.Artist);
-        var safeTitle = Sanitize(item.Title);
-        var artistFolder = string.IsNullOrEmpty(safeArtist) ? "Inconnu" : safeArtist;
-        var root = Path.GetFullPath(folder);
-        var targetDir = Path.GetFullPath(Path.Combine(root, artistFolder));
-        if (!targetDir.StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal))
-            return BadRequest(new { message = "Nom d'artiste invalide" });
-        Directory.CreateDirectory(targetDir);
-        var outTemplate = Path.Combine(targetDir, "%(title)s.%(ext)s");
-
-        // Plain m4a download, no ffmpeg post-processing (the container has none): the artist
-        // folder + clean file name carry the metadata for Jellyfin's own scanner.
-        string stdout;
+        // Same pipeline as the catalogue: main artist folder, album, clean tags, square cover,
+        // lyrics sidecar. Without a catalogue match the track is filed under its main artist.
+        CatalogTrack? track = null;
+        try { track = await _catalog.FindTrackAsync(item.Artist, item.Title, ct); } catch (Exception error) when (error is not OperationCanceledException) { }
+        track ??= new CatalogTrack
+        {
+            Id = "yt-" + request.VideoId,
+            Title = item.Title,
+            Artist = ArtistNames.Primary(item.Artist),
+            Album = item.Album,
+            Duration = item.Duration,
+        };
+        string file;
         try
         {
-            stdout = await YtMusicServiceRun(list =>
-            {
-                list.Add("-q");
-                list.Add("--no-warnings");
-                list.Add("-f");
-                list.Add("bestaudio[ext=m4a]/bestaudio");
-                list.Add("-o");
-                list.Add(outTemplate);
-                list.Add("--no-playlist");
-                list.Add("--print");
-                list.Add("after_move:filepath");
-                list.Add("https://www.youtube.com/watch?v=" + request.VideoId);
-            }, ct);
+            file = await _music.DownloadWithAudioAsync(track, request.VideoId, ct);
         }
         catch (Exception error)
         {
             _logger.LogWarning("YT download failed for {VideoId}: {Message}", request.VideoId, error.Message);
             return Upstream(error);
         }
-        // yt-dlp prints the exact final path; never guess with "newest file in the folder".
-        var file = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(l => l.Trim())
-            .LastOrDefault(l => l.Length > 0);
-        if (string.IsNullOrEmpty(file) || !System.IO.File.Exists(file))
-        {
-            // Already downloaded once: yt-dlp skips the write and prints nothing.
-            var expected = Path.Combine(targetDir, safeTitle + ".m4a");
-            file = System.IO.File.Exists(expected) ? expected : null;
-        }
-        if (string.IsNullOrEmpty(file) || !Path.GetFullPath(file).StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal))
-            return StatusCode(502, new { message = "Téléchargement terminé mais aucun .m4a trouvé." });
-
-        var folderItem = _library.FindByPath(targetDir, true)
-            ?? _library.FindByPath(folder, true)
-            ?? _library.FindByPath(Path.GetDirectoryName(folder.TrimEnd('/')) ?? folder, true);
-        if (folderItem != null)
-        {
-            var options = new MetadataRefreshOptions(_directoryService)
-            {
-                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
-                ImageRefreshMode = MetadataRefreshMode.None,
-                ReplaceAllMetadata = false,
-                ReplaceAllImages = false,
-            };
-            _providers.QueueRefresh(folderItem.Id, options, RefreshPriority.Normal);
-        }
-
+        item = _yt.Store.Item(request.VideoId) ?? item;
         item.DownloadedPath = file;
+        if (track.Cover.StartsWith("https://", StringComparison.Ordinal)) item.Cover = track.Cover;
         _yt.Store.PutItem(item);
         _yt.Store.Save();
         _yt.Touch(request.VideoId, CallerIdentity.HistoryKey(User));
+        _logger.LogInformation("online download: {File}", file);
+        return Ok(new { downloaded = true, path = file, title = track.Title, artist = track.Artist });
+    }
 
-        _logger.LogInformation("YT download: {File} ({VideoId})", file, request.VideoId);
-        return Ok(new { downloaded = true, path = file, title = item.Title, artist = item.Artist });
+    /// <summary>Finds the square album cover of an online track once (catalogue), "-" when none.</summary>
+    private async Task ResolveCoverAsync(YtItem item, CancellationToken ct)
+    {
+        if (item.Cover.Length > 0 || item.Title.Length == 0) return;
+        try
+        {
+            var match = await _catalog.FindTrackAsync(item.Artist, item.Title, ct);
+            item.Cover = match != null && match.Cover.StartsWith("https://", StringComparison.Ordinal) ? match.Cover : "-";
+            if (match != null && item.Album.Length == 0) item.Album = match.Album;
+            _yt.Store.PutItem(item);
+            _yt.Store.Save();
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { }
     }
 
     private static async Task<string> YtMusicServiceRun(Action<System.Collections.ObjectModel.Collection<string>> args, CancellationToken ct)

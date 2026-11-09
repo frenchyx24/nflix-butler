@@ -27,6 +27,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         });
         serviceCollection.AddSingleton<YtMusicService>();
         serviceCollection.AddSingleton<MusicCatalog>();
+        serviceCollection.AddSingleton<LyricsService>();
         serviceCollection.AddSingleton<MusicLibraryService>();
         serviceCollection.AddSingleton(provider =>
         {

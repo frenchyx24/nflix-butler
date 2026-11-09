@@ -19,6 +19,8 @@ public sealed class YtItem
     public string ChannelTitle { get; set; } = "";
     public int Duration { get; set; }
     public string Thumbnail { get; set; } = "";
+    /// <summary>Square album cover (catalogue), "" until resolved, "-" when none was found.</summary>
+    public string Cover { get; set; } = "";
     public string DownloadedPath { get; set; } = "";
     public DateTime UpdatedAtUtc { get; set; }
 }
@@ -53,6 +55,10 @@ public sealed class YtState
     public Dictionary<string, string> CatalogVideo { get; set; } = new(StringComparer.Ordinal);
     /// <summary>Catalogue track id → downloaded file in the music library.</summary>
     public Dictionary<string, string> CatalogFiles { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Lyrics by "artist|title" key (see LyricsService.Key).</summary>
+    public Dictionary<string, LyricsEntry> Lyrics { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Artist picture by ArtistNames.Key ("" = none found).</summary>
+    public Dictionary<string, string> ArtistPictures { get; set; } = new(StringComparer.Ordinal);
 }
 
 /**
@@ -232,6 +238,44 @@ public sealed class YtStore
     public void SetCatalogFile(string trackId, string path)
     {
         lock (_gate) { (State.CatalogFiles ??= new(StringComparer.Ordinal))[trackId] = path; }
+    }
+
+    public LyricsEntry? Lyrics(string key)
+    {
+        lock (_gate) { return State.Lyrics != null && State.Lyrics.TryGetValue(key, out var v) ? v : null; }
+    }
+
+    public void PutLyrics(string key, LyricsEntry entry)
+    {
+        lock (_gate)
+        {
+            State.Lyrics ??= new(StringComparer.Ordinal);
+            if (State.Lyrics.Count > 20000) State.Lyrics.Clear();
+            State.Lyrics[key] = entry;
+        }
+    }
+
+    public string? ArtistPicture(string key)
+    {
+        lock (_gate) { return State.ArtistPictures != null && State.ArtistPictures.TryGetValue(key, out var v) ? v : null; }
+    }
+
+    public void PutArtistPicture(string key, string url)
+    {
+        lock (_gate) { (State.ArtistPictures ??= new(StringComparer.Ordinal))[key] = url; }
+    }
+
+    /// <summary>Points every record of [oldPath] at [newPath] (library migration).</summary>
+    public int MovePath(string oldPath, string newPath)
+    {
+        var count = 0;
+        lock (_gate)
+        {
+            foreach (var item in State.Items.Values.Where(i => i.DownloadedPath == oldPath)) { item.DownloadedPath = newPath; count++; }
+            if (State.CatalogFiles != null)
+                foreach (var key in State.CatalogFiles.Where(kv => kv.Value == oldPath).Select(kv => kv.Key).ToList()) { State.CatalogFiles[key] = newPath; count++; }
+        }
+        return count;
     }
 
     public static string Normalize(string value) =>

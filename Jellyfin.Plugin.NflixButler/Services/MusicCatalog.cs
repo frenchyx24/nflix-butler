@@ -252,5 +252,51 @@ public sealed class MusicCatalog
             ?? list.FirstOrDefault();
     }
 
+    /// <summary>Most played tracks right now (public chart).</summary>
+    public async Task<List<CatalogTrack>> ChartTracksAsync(int limit, CancellationToken ct)
+    {
+        var root = await GetAsync("chart/0/tracks?limit=" + Math.Clamp(limit, 1, 50), TimeSpan.FromHours(3), ct).ConfigureAwait(false);
+        return Data(root).Select(t => Track(t)).Where(t => t.Id.Length > 0).ToList();
+    }
+
+    /// <summary>New releases picked by the editors (albums).</summary>
+    public async Task<List<CatalogAlbum>> NewReleasesAsync(int limit, CancellationToken ct)
+    {
+        var root = await GetAsync("editorial/0/releases?limit=" + Math.Clamp(limit, 1, 50), TimeSpan.FromHours(6), ct).ConfigureAwait(false);
+        return Data(root).Select(a => Album(a)).Where(a => a.Id.Length > 0).ToList();
+    }
+
+    /// <summary>Artist radio: tracks by this artist and similar ones.</summary>
+    public async Task<List<CatalogTrack>> ArtistRadioAsync(string id, int limit, CancellationToken ct)
+    {
+        var root = await GetAsync("artist/" + id + "/radio?limit=" + Math.Clamp(limit, 1, 50), TimeSpan.FromHours(6), ct).ConfigureAwait(false);
+        return Data(root).Select(t => Track(t)).Where(t => t.Id.Length > 0).ToList();
+    }
+
+    /// <summary>Best catalogue track for an artist + title (title match required).</summary>
+    public async Task<CatalogTrack?> FindTrackAsync(string artist, string title, CancellationToken ct)
+    {
+        var primary = ArtistNames.Primary(artist);
+        var cleanTitle = LyricsService.CleanTitle(title);
+        if (cleanTitle.Length == 0) return null;
+        var q = primary.Length > 0
+            ? "artist:\"" + primary.Replace("\"", "") + "\" track:\"" + cleanTitle.Replace("\"", "") + "\""
+            : cleanTitle;
+        var root = await GetAsync("search/track?q=" + Uri.EscapeDataString(q) + "&limit=10", TimeSpan.FromHours(24), ct).ConfigureAwait(false);
+        var list = Data(root).Select(t => Track(t)).Where(t => t.Id.Length > 0).ToList();
+        if (list.Count == 0 && primary.Length > 0)
+        {
+            root = await GetAsync("search/track?q=" + Uri.EscapeDataString(primary + " " + cleanTitle) + "&limit=10", TimeSpan.FromHours(24), ct).ConfigureAwait(false);
+            list = Data(root).Select(t => Track(t)).Where(t => t.Id.Length > 0).ToList();
+        }
+        var wanted = Norm(cleanTitle);
+        var wantedArtist = ArtistNames.Key(primary);
+        return list
+            .Where(t => { var n = Norm(LyricsService.CleanTitle(t.Title)); return n == wanted || n.StartsWith(wanted, StringComparison.Ordinal) || wanted.StartsWith(n, StringComparison.Ordinal); })
+            .OrderByDescending(t => wantedArtist.Length > 0 && ArtistNames.Key(t.Artist) == wantedArtist)
+            .ThenByDescending(t => Norm(LyricsService.CleanTitle(t.Title)) == wanted)
+            .FirstOrDefault();
+    }
+
     internal static string Norm(string value) => Api.SyncController.Normalize(value);
 }

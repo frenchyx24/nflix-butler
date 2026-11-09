@@ -4,7 +4,10 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.NflixButler.Services;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -28,9 +31,17 @@ public class MusicController : ControllerBase
     private readonly MusicLibraryService _music;
     private readonly YtMusicService _yt;
     private readonly ILogger<MusicController> _logger;
+    private readonly LyricsService _lyrics;
+    private readonly ILibraryManager _library;
+    private readonly IUserManager _users;
 
-    public MusicController(MusicCatalog catalog, MusicLibraryService music, YtMusicService yt, ILogger<MusicController> logger)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (DateTime At, object Value)> FeedCache = new();
+
+    public MusicController(MusicCatalog catalog, MusicLibraryService music, YtMusicService yt, LyricsService lyrics, ILibraryManager library, IUserManager users, ILogger<MusicController> logger)
     {
+        _lyrics = lyrics;
+        _library = library;
+        _users = users;
         _catalog = catalog;
         _music = music;
         _yt = yt;
@@ -224,5 +235,213 @@ public class MusicController : ControllerBase
             result[id] = new { state, itemId = itemId?.ToString("N"), message = job?.Message ?? "" };
         }
         return Ok(new { states = result, canDownload = MayDownload() });
+    }
+
+    /**
+     * Online suggestions for the music home: "Pour toi" (top tracks of the artists the user
+     * listens to), artist mixes (radio), new releases, similar artists and trends. Square covers
+     * come with the catalogue. Cached 30 min per user.
+     */
+    [HttpGet("feed")]
+    public async Task<IActionResult> Feed([FromQuery] bool refresh = false, CancellationToken ct = default)
+    {
+        var userId = CallerIdentity.UserId(User);
+        var now = DateTime.UtcNow;
+        if (!refresh && FeedCache.TryGetValue(userId, out var cached) && now - cached.At < TimeSpan.FromMinutes(30))
+            return Ok(cached.Value);
+        try
+        {
+            var seeds = HeardArtists(userId, 6);
+            var artists = new List<CatalogArtist>();
+            foreach (var name in seeds)
+            {
+                if (artists.Count >= 4) break;
+                try
+                {
+                    var found = await _catalog.FindArtistAsync(name, ct);
+                    if (found != null && found.Id.Length > 0 && ArtistNames.Key(found.Name) == ArtistNames.Key(name) && artists.All(a => a.Id != found.Id))
+                        artists.Add(found);
+                }
+                catch (Exception error) when (error is not OperationCanceledException) { }
+            }
+
+            var releases = _catalog.NewReleasesAsync(16, ct);
+            var chart = _catalog.ChartTracksAsync(20, ct);
+            var tops = artists.Select(a => _catalog.ArtistTopAsync(a.Id, 6, ct)).ToList();
+            var radios = artists.Take(3).Select(a => _catalog.ArtistRadioAsync(a.Id, 25, ct)).ToList();
+            var related = artists.Count > 0 ? _catalog.RelatedAsync(artists[0].Id, ct) : Task.FromResult(new List<CatalogArtist>());
+            async Task<T?> Safe<T>(Task<T> task) where T : class { try { return await task; } catch (Exception error) when (error is not OperationCanceledException) { return null; } }
+
+            var sections = new List<object>();
+            // Pour toi: one track of each heard artist in turn, then their radios.
+            var forYou = new List<CatalogTrack>();
+            var topLists = new List<List<CatalogTrack>>();
+            foreach (var t in tops) topLists.Add(await Safe(t) ?? new List<CatalogTrack>());
+            var radioLists = new List<List<CatalogTrack>>();
+            foreach (var r in radios) radioLists.Add(await Safe(r) ?? new List<CatalogTrack>());
+            for (var i = 0; i < 6; i++) foreach (var list in topLists) if (i < list.Count) forYou.Add(list[i]);
+            var heardKeys = artists.Select(a => ArtistNames.Key(a.Name)).ToHashSet();
+            foreach (var list in radioLists) forYou.AddRange(list.Where(t => !heardKeys.Contains(ArtistNames.Key(t.Artist))).Take(4));
+            forYou = forYou.GroupBy(t => t.Id).Select(g => g.First()).Take(24).ToList();
+            if (forYou.Count > 0)
+                sections.Add(new { key = "for-you", title = "Pour toi", subtitle = "D'après vos écoutes", type = "tracks", tracks = forYou.Select(TrackJson) });
+
+            var mixes = new List<object>();
+            for (var i = 0; i < radioLists.Count; i++)
+            {
+                if (radioLists[i].Count == 0) continue;
+                mixes.Add(new
+                {
+                    id = artists[i].Id,
+                    title = "Mix " + artists[i].Name,
+                    subtitle = string.Join(", ", radioLists[i].Select(t => t.Artist).Where(a => a.Length > 0).Distinct().Take(3)) + " et plus",
+                    cover = artists[i].Picture,
+                    tracks = radioLists[i].Select(TrackJson),
+                });
+            }
+            if (mixes.Count > 0)
+                sections.Add(new { key = "mixes", title = "Vos mix du jour", subtitle = "Basés sur vos artistes", type = "mixes", mixes });
+
+            var newAlbums = await Safe(releases);
+            if (newAlbums is { Count: > 0 })
+                sections.Add(new { key = "releases", title = "Nouveautés", subtitle = "Les sorties du moment", type = "albums", albums = newAlbums.Select(AlbumJson) });
+
+            var similar = await Safe(related);
+            if (similar is { Count: > 0 } && artists.Count > 0)
+                sections.Add(new { key = "similar", title = "Artistes similaires à " + artists[0].Name, subtitle = "", type = "artists", artists = similar.Select(ArtistJson) });
+
+            var trends = await Safe(chart);
+            if (trends is { Count: > 0 })
+                sections.Add(new { key = "trends", title = "Tendances", subtitle = "Les titres les plus écoutés", type = "tracks", tracks = trends.Select(TrackJson) });
+
+            var payload = new { sections };
+            if (FeedCache.Count > 500) FeedCache.Clear();
+            FeedCache[userId] = (now, payload);
+            return Ok(payload);
+        }
+        catch (Exception error)
+        {
+            return Upstream(error);
+        }
+    }
+
+    /// <summary>Main artists the user listens to: Jellyfin play history first, then online listens.</summary>
+    private List<string> HeardArtists(Guid userId, int limit)
+    {
+        var names = new List<string>();
+        if (userId != Guid.Empty)
+        {
+            try
+            {
+                var user = _users.GetUserById(userId);
+                if (user != null)
+                {
+                    var query = new InternalItemsQuery(user)
+                    {
+                        Recursive = true,
+                        IncludeItemTypes = new[] { BaseItemKind.Audio },
+                        IsPlayed = true,
+                        Limit = 200,
+                        OrderBy = new[] { (ItemSortBy.DatePlayed, Jellyfin.Database.Implementations.Enums.SortOrder.Descending) },
+                    };
+                    foreach (var item in _library.GetItemList(query))
+                        if (item is MediaBrowser.Controller.Entities.Audio.Audio audio)
+                            names.AddRange((audio.AlbumArtists?.Count > 0 ? audio.AlbumArtists : audio.Artists ?? Array.Empty<string>()).Take(1));
+                }
+            }
+            catch (Exception error) { _logger.LogDebug("music feed: play history unavailable: {Message}", error.Message); }
+            var recent = _yt.Store.Items(_yt.Store.UserRecentList(userId.ToString("N"), 40).Select(r => r.VideoId));
+            names.AddRange(recent.Where(i => i.Artist.Length > 0).Select(i => i.Artist));
+        }
+        if (names.Count == 0)
+        {
+            // New user: the library's own artists.
+            try
+            {
+                var query = new InternalItemsQuery { Recursive = true, IncludeItemTypes = new[] { BaseItemKind.Audio }, Limit = 200, OrderBy = new[] { (ItemSortBy.DateCreated, Jellyfin.Database.Implementations.Enums.SortOrder.Descending) } };
+                foreach (var item in _library.GetItemList(query))
+                    if (item is MediaBrowser.Controller.Entities.Audio.Audio audio)
+                        names.AddRange((audio.AlbumArtists?.Count > 0 ? audio.AlbumArtists : audio.Artists ?? Array.Empty<string>()).Take(1));
+            }
+            catch { }
+        }
+        return names.Select(ArtistNames.Primary).Where(n => n.Length > 1)
+            .GroupBy(ArtistNames.Key).OrderByDescending(g => g.Count())
+            .Select(g => g.First()).Take(limit).ToList();
+    }
+
+    /**
+     * Lyrics of a track, synced when a source has them. Works for library and online tracks alike
+     * (lookup by artist + title, album and duration refine the match). Cached server-side.
+     */
+    [HttpGet("lyrics")]
+    public async Task<IActionResult> Lyrics([FromQuery] string? artist, [FromQuery] string? title, [FromQuery] string? album, [FromQuery] int duration = 0, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) || artist.Length > 300 || title.Length > 300)
+            return BadRequest(new { message = "artist et title requis" });
+        try
+        {
+            var entry = await _lyrics.GetAsync(artist, title, album ?? "", Math.Clamp(duration, 0, 7200), ct);
+            return Ok(new
+            {
+                synced = entry.Synced,
+                instrumental = entry.Instrumental,
+                lines = entry.Lines.Select(l => new { startMs = l.StartMs, text = l.Text }),
+            });
+        }
+        catch (Exception error)
+        {
+            return Upstream(error);
+        }
+    }
+
+    /**
+     * Artist pictures for library artists that have none: names separated by "|", exact name
+     * match only. Cached forever server-side; at most 20 new lookups per call (catalogue rate).
+     */
+    [HttpGet("pictures")]
+    public async Task<IActionResult> Pictures([FromQuery] string? names, CancellationToken ct = default)
+    {
+        var wanted = (names ?? "").Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(n => n.Length is > 0 and <= 200).Distinct(StringComparer.OrdinalIgnoreCase).Take(120).ToList();
+        var result = new Dictionary<string, string>();
+        var lookups = 0;
+        foreach (var name in wanted)
+        {
+            var key = ArtistNames.Key(name);
+            if (key.Length == 0) continue;
+            var known = _yt.Store.ArtistPicture(key);
+            if (known == null && lookups < 20)
+            {
+                lookups++;
+                try
+                {
+                    var artist = await _catalog.FindArtistAsync(name, ct);
+                    known = artist != null && ArtistNames.Key(artist.Name) == key && artist.Picture.StartsWith("https://", StringComparison.Ordinal)
+                        && !artist.Picture.Contains("/artist//", StringComparison.Ordinal) ? artist.Picture : "";
+                    _yt.Store.PutArtistPicture(key, known);
+                }
+                catch (Exception error) when (error is not OperationCanceledException) { known = null; }
+            }
+            if (!string.IsNullOrEmpty(known)) result[name] = known;
+        }
+        if (lookups > 0) _yt.Store.Save();
+        return Ok(new { pictures = result });
+    }
+
+    /** Re-files the online-music folder (main artist only, tags, covers, lyrics). Admin only. */
+    [Authorize(Policy = "RequiresElevation")]
+    [HttpPost("migrate")]
+    public async Task<IActionResult> Migrate(CancellationToken ct)
+    {
+        try
+        {
+            var files = await _music.MigrateAsync(ct);
+            return Ok(new { count = files.Count, files = files.Select(f => new { from = f.From, to = f.To, artist = f.Artist, album = f.Album, matched = f.Matched, lyrics = f.Lyrics }) });
+        }
+        catch (InvalidOperationException error)
+        {
+            return StatusCode(409, new { message = error.Message });
+        }
     }
 }
