@@ -41,6 +41,11 @@ public sealed class PendingTrack
     public DateTime AddedUtc { get; set; } = DateTime.UtcNow;
     public DateTime NextUtc { get; set; } = DateTime.MinValue;
     public DateTime RequestedUtc { get; set; }
+
+    /// <summary>Direct download by Nflix when Lidarr finds nothing: "", running, done, failed.</summary>
+    public string DlState { get; set; } = "";
+    public int DlTries { get; set; }
+    public DateTime DlNextUtc { get; set; } = DateTime.MinValue;
 }
 
 /// <summary>
@@ -58,9 +63,10 @@ public sealed class PendingMusicService : BackgroundService
     private readonly ILibraryManager _library;
     private readonly IPlaylistManager _playlists;
     private readonly MusicCatalog _catalog;
+    private readonly MusicLibraryService _music;
     private readonly ILogger<PendingMusicService> _logger;
 
-    public PendingMusicService(IApplicationPaths paths, ILibraryManager library, IPlaylistManager playlists, MusicCatalog catalog, ILogger<PendingMusicService> logger)
+    public PendingMusicService(IApplicationPaths paths, ILibraryManager library, IPlaylistManager playlists, MusicCatalog catalog, MusicLibraryService music, ILogger<PendingMusicService> logger)
     {
         var dir = Path.Combine(paths.PluginConfigurationsPath, "NflixButler");
         Directory.CreateDirectory(dir);
@@ -68,9 +74,12 @@ public sealed class PendingMusicService : BackgroundService
         _library = library;
         _playlists = playlists;
         _catalog = catalog;
+        _music = music;
         _logger = logger;
         try { _items = File.Exists(_path) ? JsonSerializer.Deserialize<List<PendingTrack>>(File.ReadAllText(_path)) ?? new() : new(); }
         catch { _items = new(); }
+        // A download cut by a restart starts over.
+        foreach (var t in _items.Where(t => t.DlState == "running")) t.DlState = "";
     }
 
     private static Configuration.PluginConfiguration Config => Plugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
@@ -191,6 +200,52 @@ public sealed class PendingMusicService : BackgroundService
             changed = true;
         }
         if (changed) Save();
+        await DirectDownloadsAsync(ct).ConfigureAwait(false);
+    }
+
+    private const int MaxDirectTries = 3;
+
+    /// <summary>
+    /// Lidarr only finds whole albums on its indexers; a track it cannot fetch within 20 minutes
+    /// (no source, failed or blocked import) is downloaded by Nflix itself from its exact audio id.
+    /// </summary>
+    private async Task DirectDownloadsAsync(CancellationToken ct)
+    {
+        List<PendingTrack> snapshot;
+        lock (_gate) snapshot = _items.ToList();
+        var status = await StatusAsync(snapshot, ct).ConfigureAwait(false);
+        var started = 0;
+        foreach (var track in snapshot)
+        {
+            if (started >= 3) break;
+            if (track.VideoId.Length == 0 || track.DlState is "running" or "done") continue;
+            if (track.DlState == "failed" && (track.DlTries >= MaxDirectTries || track.DlNextUtc > DateTime.UtcNow)) continue;
+            var kind = status.TryGetValue(track.Id, out var st) ? st.Kind : "";
+            var lidarrStuck = kind is "nosource" or "failed" or "blocked" or "online"
+                || (track.State == "requested" && kind == "searching" && DateTime.UtcNow - track.RequestedUtc > TimeSpan.FromMinutes(20));
+            if (!lidarrStuck) continue;
+            started++;
+            track.DlState = "running";
+            Save();
+            try
+            {
+                var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false);
+                var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = track.Title, Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromMinutes(10));
+                var file = await _music.DownloadWithAudioAsync(catalogTrack, track.VideoId, cts.Token).ConfigureAwait(false);
+                track.DlState = "done";
+                _logger.LogInformation("pending: « {Title} » téléchargé directement ({File})", track.Title, file);
+            }
+            catch (Exception error) when (!ct.IsCancellationRequested)
+            {
+                track.DlTries++;
+                track.DlState = "failed";
+                track.DlNextUtc = DateTime.UtcNow.AddMinutes(10 * track.DlTries * track.DlTries);
+                _logger.LogWarning("pending: direct download {Try}/{Max} failed for {Title}: {Message}", track.DlTries, MaxDirectTries, track.Title, error.Message);
+            }
+            Save();
+        }
     }
 
     private static HttpRequestMessage LidarrRequest(HttpMethod method, string path, JsonNode? body = null)
@@ -284,7 +339,7 @@ public sealed class PendingMusicService : BackgroundService
         _logger.LogInformation("pending: album « {Album} » demandé à Lidarr pour « {Title} »", pick["title"]?.GetValue<string>(), track.Title);
     }
 
-    public sealed record Progress(string Label, int Percent);
+    public sealed record Progress(string Label, int Percent, string Kind = "");
 
     private Dictionary<int, Progress> _queueCache = new();
     private DateTime _queueAt = DateTime.MinValue;
@@ -312,11 +367,11 @@ public sealed class PendingMusicService : BackgroundService
                     var eta = r["timeleft"]?.GetValue<string>() ?? "";
                     Progress p = tracked switch
                     {
-                        "importPending" or "importing" => new Progress("Import sur le serveur", 100),
-                        "failedPending" or "failed" => new Progress("Échec du téléchargement, nouvel essai", -1),
-                        _ when warn == "warning" && status != "downloading" => new Progress(pct >= 100 ? "Import bloqué, vérification en cours" : "Téléchargement bloqué", pct),
-                        _ when status is "queued" or "delay" or "paused" => new Progress("En file de téléchargement", pct),
-                        _ => new Progress("Téléchargement " + pct + " %" + (eta.Length > 0 && TimeSpan.TryParse(eta, out var t) ? " · " + (t.TotalMinutes >= 1 ? (int)t.TotalMinutes + " min" : "< 1 min") : ""), pct),
+                        "importPending" or "importing" => new Progress("Import sur le serveur", 100, "importing"),
+                        "failedPending" or "failed" => new Progress("Échec du téléchargement, nouvel essai", -1, "failed"),
+                        _ when warn == "warning" && status != "downloading" => new Progress(pct >= 100 ? "Import bloqué, vérification en cours" : "Téléchargement bloqué", pct, "blocked"),
+                        _ when status is "queued" or "delay" or "paused" => new Progress("En file de téléchargement", pct, "queued"),
+                        _ => new Progress("Téléchargement " + pct + " %" + (eta.Length > 0 && TimeSpan.TryParse(eta, out var t) ? " · " + (t.TotalMinutes >= 1 ? (int)t.TotalMinutes + " min" : "< 1 min") : ""), pct, "downloading"),
                     };
                     if (!map.TryGetValue(albumId, out var prev) || p.Percent > prev.Percent) map[albumId] = p;
                 }
@@ -327,21 +382,27 @@ public sealed class PendingMusicService : BackgroundService
         }
         foreach (var t in tracks)
         {
+            if (t.DlState == "running") { result[t.Id] = new Progress("Téléchargement direct en cours", -1, "direct"); continue; }
+            if (t.DlState == "done") { result[t.Id] = new Progress("Ajout à la bibliothèque", 100, "files"); continue; }
             if (t.State == "requested" && _queueCache.TryGetValue(t.LidarrAlbumId, out var q)) { result[t.Id] = q; continue; }
             if (t.State == "requested" && t.LidarrAlbumId > 0)
             {
                 var files = await AlbumFilesAsync(t.LidarrAlbumId, ct).ConfigureAwait(false);
-                if (files > 0) { result[t.Id] = new Progress("Ajout à la bibliothèque", 100); continue; }
+                if (files > 0) { result[t.Id] = new Progress("Ajout à la bibliothèque", 100, "files"); continue; }
             }
             result[t.Id] = t.State switch
             {
                 "requested" => DateTime.UtcNow - t.RequestedUtc < TimeSpan.FromMinutes(30) || t.RequestedUtc == default
-                    ? new Progress("Recherche d'une source", -1)
-                    : new Progress("Aucune source pour l'instant", -1),
-                "notfound" => new Progress("Lecture en ligne uniquement", -1),
-                "disabled" => new Progress("Lecture en ligne uniquement", -1),
-                _ => new Progress(t.Tries > 0 ? "Nouvel essai bientôt" : "En préparation", -1),
+                    ? new Progress("Recherche d'une source", -1, "searching")
+                    : new Progress("Aucune source pour l'instant", -1, "nosource"),
+                "notfound" or "disabled" => new Progress("Lecture en ligne uniquement", -1, "online"),
+                _ => new Progress(t.Tries > 0 ? "Nouvel essai bientôt" : "En préparation", -1, "prep"),
             };
+            // A failed direct download overrides the Lidarr wording with its own retry state.
+            if (t.DlState == "failed")
+                result[t.Id] = t.DlTries >= MaxDirectTries
+                    ? new Progress("Lecture en ligne uniquement", -1, "online")
+                    : new Progress("Nouvel essai du téléchargement (" + t.DlTries + "/" + MaxDirectTries + ")", -1, result[t.Id].Kind);
         }
         return result;
     }
