@@ -14,12 +14,14 @@ namespace Jellyfin.Plugin.NflixButler.Services;
  */
 public static class ArtistNames
 {
-    private static readonly Regex Featuring = new(@"\s+(feat\.?|ft\.?|featuring|with|x|avec)\s+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex Featuring = new(@"\s+(feat\.?|ft\.?|featuring|with|x|avec|&)\s+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly string[] CommaNames =
     {
         "tyler, the creator", "earth, wind & fire", "crosby, stills, nash & young", "crosby, stills & nash",
         "emerson, lake & palmer", "peter, paul and mary", "blood, sweat & tears", "now, now", "black country, new road",
+        "simon & garfunkel", "hall & oates", "echo & the bunnymen", "the mamas & the papas", "sam & dave",
+        "ike & tina turner", "mumford & sons", "florence & the machine", "peter & gordon", "chad & jeremy",
     };
 
     /// <summary>Main artist of a credit ("Daft Punk, Pharrell Williams" → "Daft Punk").</summary>
