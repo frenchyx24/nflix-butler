@@ -75,7 +75,13 @@ public class YtMusicController : ControllerBase
         : item != null && item.Thumbnail.Length > 0 ? item.Thumbnail
         : "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
 
-    private static object ItemJson(YtItem i) => new
+    /** Video stills are never shown: a track either has a square catalogue cover or no image. */
+    private static bool IsVideoStill(string url) =>
+        url.Contains("ytimg.com", StringComparison.OrdinalIgnoreCase)
+        || url.Contains("googleusercontent.com", StringComparison.OrdinalIgnoreCase)
+        || url.Contains("ggpht.com", StringComparison.OrdinalIgnoreCase);
+
+    private static object ItemJson(YtItem i, bool squareOnly = false) => new
     {
         videoId = i.VideoId,
         title = i.Title,
@@ -85,7 +91,10 @@ public class YtMusicController : ControllerBase
         channelId = i.ChannelId,
         channelTitle = i.ChannelTitle,
         duration = i.Duration,
-        thumbnail = CoverOf(i, i.VideoId),
+        thumbnail = squareOnly
+            ? i.Cover.StartsWith("https://", StringComparison.Ordinal) ? i.Cover
+                : i.Thumbnail.StartsWith("https://", StringComparison.Ordinal) && !IsVideoStill(i.Thumbnail) ? i.Thumbnail : null
+            : CoverOf(i, i.VideoId),
         downloaded = i.DownloadedPath.Length > 0,
     };
 
@@ -141,12 +150,25 @@ public class YtMusicController : ControllerBase
             searches = _yt.Store.UserSearchList(CallerIdentity.HistoryKey(User), limit).Select(s => new { query = s.Query, atUtc = s.AtUtc }),
         });
 
-    /// <summary>Recently played/seen tracks with their cached metadata.</summary>
+    /// <summary>Recently played/seen tracks with their cached metadata, square covers only.</summary>
     [HttpGet("recent")]
-    public IActionResult Recent([FromQuery] int limit = 20)
+    public async Task<IActionResult> Recent([FromQuery] int limit = 20, CancellationToken ct = default)
     {
-        var recents = _yt.Store.UserRecentList(CallerIdentity.HistoryKey(User), limit);
-        return Ok(new { items = _yt.Store.Items(recents.Select(r => r.VideoId)).Select(ItemJson) });
+        var recents = _yt.Store.UserRecentList(CallerIdentity.HistoryKey(User), Math.Clamp(limit, 1, 100));
+        var items = _yt.Store.Items(recents.Select(r => r.VideoId)).ToList();
+        var pending = items.Where(i => !i.Cover.StartsWith("https://", StringComparison.Ordinal)).Take(12).ToList();
+        using (var gate = new SemaphoreSlim(3, 3))
+        {
+            await Task.WhenAll(pending.Select(async item =>
+            {
+                await gate.WaitAsync(ct);
+                try { await ResolveCoverAsync(item, ct); }
+                catch (OperationCanceledException) { }
+                catch (Exception error) { _logger.LogDebug("recent cover: {Message}", error.Message); }
+                finally { gate.Release(); }
+            }));
+        }
+        return Ok(new { items = items.Select(i => ItemJson(i, squareOnly: true)) });
     }
 
     /// <summary>Artist page: top tracks for an artist name (YT Music search, ranked).</summary>
