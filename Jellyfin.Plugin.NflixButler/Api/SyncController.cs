@@ -34,11 +34,13 @@ public class SyncController : ControllerBase
     private readonly SyncStore _store;
     private readonly ILibraryManager _library;
     private readonly ILogger<SyncController> _logger;
+    private readonly PendingMusicService _pending;
 
-    public SyncController(SyncStore store, ILibraryManager library, ILogger<SyncController> logger)
+    public SyncController(SyncStore store, ILibraryManager library, PendingMusicService pending, ILogger<SyncController> logger)
     {
         _store = store;
         _library = library;
+        _pending = pending;
         _logger = logger;
     }
 
@@ -96,6 +98,78 @@ public class SyncController : ControllerBase
         public string Service { get; set; } = "";
         public string Code { get; set; } = "";
         public string UserId { get; set; } = "";
+    }
+
+    public sealed class PendingRequest
+    {
+        public string UserId { get; set; } = "";
+        public string PlaylistId { get; set; } = "";
+        public List<PendingItem> Tracks { get; set; } = new();
+    }
+
+    public sealed class PendingItem
+    {
+        public string Title { get; set; } = "";
+        public string Artist { get; set; } = "";
+        public string VideoId { get; set; } = "";
+        public int Position { get; set; }
+    }
+
+    /**
+     * Keeps the tracks of an imported playlist that the library lacks: they stay in the playlist
+     * (played online) and are fetched by Lidarr in the background, then swapped for the real file.
+     */
+    [HttpPost("pending")]
+    public IActionResult AddPending([FromBody] PendingRequest request)
+    {
+        if (IsOtherUser(request.UserId)) return Forbid();
+        if (!Guid.TryParse(request.PlaylistId, out var playlistGuid)) return BadRequest(new { message = "playlistId invalide" });
+        var tracks = (request.Tracks ?? new()).Take(1000)
+            .Where(t => !string.IsNullOrWhiteSpace(t.Title) && t.Title.Length <= 300 && (t.Artist ?? "").Length <= 300)
+            .Select(t => new PendingTrack
+            {
+                PlaylistId = playlistGuid.ToString("N"),
+                UserId = Guid.Parse(request.UserId).ToString("N"),
+                Position = t.Position,
+                Title = t.Title.Trim(),
+                Artist = (t.Artist ?? "").Trim(),
+                VideoId = CallerIdentity.IsVideoId(t.VideoId) ? t.VideoId : "",
+            }).ToList();
+        _pending.Add(tracks);
+        return Ok(new { queued = tracks.Count, downloads = PendingMusicService.LidarrConfigured });
+    }
+
+    [HttpGet("pending")]
+    public IActionResult GetPending([FromQuery] string userId, [FromQuery] string playlistId)
+    {
+        if (IsOtherUser(userId)) return Forbid();
+        if (!Guid.TryParse(playlistId, out var playlistGuid)) return BadRequest(new { message = "playlistId invalide" });
+        var owner = Guid.Parse(userId).ToString("N");
+        var list = _pending.ForPlaylist(playlistGuid.ToString("N")).Where(x => x.UserId == owner).ToList();
+        return Ok(new
+        {
+            tracks = list.Select(t => new
+            {
+                id = t.Id,
+                title = t.Title,
+                artist = t.Artist,
+                album = t.Album,
+                cover = t.Cover,
+                duration = t.Duration,
+                videoId = t.VideoId,
+                position = t.Position,
+                state = t.State,
+            }),
+        });
+    }
+
+    [HttpDelete("pending")]
+    public IActionResult DeletePending([FromQuery] string userId, [FromQuery] string playlistId, [FromQuery] string id)
+    {
+        if (IsOtherUser(userId)) return Forbid();
+        if (!Guid.TryParse(playlistId, out var playlistGuid) || !CallerIdentity.IsPlaylistId(id)) return BadRequest(new { message = "id invalide" });
+        var owned = _pending.ForPlaylist(playlistGuid.ToString("N")).Any(x => x.Id == id && x.UserId == Guid.Parse(userId).ToString("N"));
+        return owned && _pending.Remove(playlistGuid.ToString("N"), id) ? NoContent() : NotFound();
     }
 
     public sealed class ImportRequest
@@ -546,13 +620,14 @@ public class SyncController : ControllerBase
 
         var matched = new List<object>();
         var missing = new List<object>();
-        foreach (var track in tracks)
+        for (var position = 0; position < tracks.Count; position++)
         {
+            var track = tracks[position];
             var item = MatchLocal(track.Title, track.Artist);
             if (item != null)
-                matched.Add(new { itemId = item.Id.ToString("N"), title = track.Title, artist = track.Artist, localName = item.Name });
+                matched.Add(new { itemId = item.Id.ToString("N"), title = track.Title, artist = track.Artist, localName = item.Name, position });
             else
-                missing.Add(new { title = track.Title, artist = track.Artist, videoId = track.VideoId });
+                missing.Add(new { title = track.Title, artist = track.Artist, videoId = track.VideoId, position });
         }
         return Ok(new { total = tracks.Count, matched, missing });
     }
@@ -561,15 +636,17 @@ public class SyncController : ControllerBase
     /// Matches one track against the local library: Jellyfin search "artist title", then a title-only
     /// fallback. Best normalized title hit wins, with the artist as a tie-breaker.
     /// </summary>
-    private MediaBrowser.Controller.Entities.BaseItem? MatchLocal(string title, string artist)
+    private MediaBrowser.Controller.Entities.BaseItem? MatchLocal(string title, string artist) => MatchLocal(_library, title, artist);
+
+    internal static MediaBrowser.Controller.Entities.BaseItem? MatchLocal(ILibraryManager library, string title, string artist)
     {
         var wanted = Normalize(title);
         if (wanted.Length < 2) return null;
         var wantedArtist = Normalize(artist);
         try
         {
-            var candidates = SearchCandidates(artist + " " + title);
-            if (candidates.Count == 0) candidates = SearchCandidates(title);
+            var candidates = SearchCandidates(library, artist + " " + title);
+            if (candidates.Count == 0) candidates = SearchCandidates(library, title);
             MediaBrowser.Controller.Entities.BaseItem? best = null;
             var bestScore = 0.0;
             foreach (var candidate in candidates)
@@ -589,14 +666,13 @@ public class SyncController : ControllerBase
             }
             return best;
         }
-        catch (Exception error)
+        catch (Exception)
         {
-            _logger.LogWarning(error, "sync: match local failed for {Title}", title);
             return null;
         }
     }
 
-    private List<MediaBrowser.Controller.Entities.BaseItem> SearchCandidates(string term)
+    private static List<MediaBrowser.Controller.Entities.BaseItem> SearchCandidates(ILibraryManager library, string term)
     {
         var query = new InternalItemsQuery
         {
@@ -605,7 +681,7 @@ public class SyncController : ControllerBase
             SearchTerm = term,
             Limit = 12,
         };
-        return _library.GetItemList(query).ToList();
+        return library.GetItemList(query).ToList();
     }
 
     private static double Score(string candidate, string wanted)

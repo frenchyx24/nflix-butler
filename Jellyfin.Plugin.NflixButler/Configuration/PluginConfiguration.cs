@@ -89,6 +89,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Secret of the Google OAuth client.</summary>
     public string GoogleClientSecret { get; set; } = "";
 
+    /// <summary>Lidarr base URL used to fetch the tracks of imported playlists that are not in the library yet.</summary>
+    public string LidarrUrl { get; set; } = "";
+
+    /// <summary>Lidarr API key (Settings → General).</summary>
+    public string LidarrApiKey { get; set; } = "";
+
+    /// <summary>Lidarr root folder for new artists; empty = the first root folder.</summary>
+    public string LidarrRootFolder { get; set; } = "";
+
     /// <summary>Video containers the butler reacts to.</summary>
     public string[] VideoExtensions { get; set; } =
     {

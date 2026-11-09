@@ -29,6 +29,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<MusicCatalog>();
         serviceCollection.AddSingleton<LyricsService>();
         serviceCollection.AddSingleton<MusicLibraryService>();
+        serviceCollection.AddSingleton<PendingMusicService>();
+        serviceCollection.AddHostedService(provider => provider.GetRequiredService<PendingMusicService>());
         serviceCollection.AddSingleton(provider =>
         {
             var paths = provider.GetRequiredService<IApplicationPaths>();
