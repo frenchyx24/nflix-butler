@@ -114,6 +114,7 @@ public sealed class PendingMusicService : BackgroundService
             }
         }
         Save();
+        QueueArtists(tracks.Select(t => t.Artist));
         _wake.Release();
     }
 
@@ -132,6 +133,98 @@ public sealed class PendingMusicService : BackgroundService
 
     private readonly SemaphoreSlim _wake = new(0);
 
+    // ---- Discographies -------------------------------------------------------------------------
+
+    private string ArtistsPath => Path.Combine(Path.GetDirectoryName(_path)!, "artists.json");
+    private Dictionary<string, DateTime>? _artistsDone;
+    private readonly Queue<string> _artistQueue = new();
+
+    private Dictionary<string, DateTime> ArtistsDone
+    {
+        get
+        {
+            if (_artistsDone != null) return _artistsDone;
+            try { _artistsDone = File.Exists(ArtistsPath) ? JsonSerializer.Deserialize<Dictionary<string, DateTime>>(File.ReadAllText(ArtistsPath)) : null; }
+            catch { }
+            return _artistsDone ??= new();
+        }
+    }
+
+    /// <summary>Queues the whole discography of these artists (main credit only, once every 14 days).</summary>
+    public void QueueArtists(IEnumerable<string> credits)
+    {
+        if (!Config.DownloadDiscographies) return;
+        lock (_gate)
+        {
+            foreach (var credit in credits)
+            {
+                var name = ArtistNames.Primary(credit).Trim();
+                var key = ArtistNames.Key(name);
+                if (key.Length < 2 || _artistQueue.Any(q => ArtistNames.Key(q) == key)) continue;
+                if (ArtistsDone.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromDays(14)) continue;
+                _artistQueue.Enqueue(name);
+            }
+        }
+        _wake.Release();
+    }
+
+    /// <summary>One artist per pass: every album, EP and single the library does not have yet goes to the download queue.</summary>
+    private async Task DiscographyStepAsync(CancellationToken ct)
+    {
+        string? name;
+        lock (_gate) name = _artistQueue.Count > 0 ? _artistQueue.Dequeue() : null;
+        if (name == null) return;
+        var key = ArtistNames.Key(name);
+        try
+        {
+            var artist = await _catalog.FindArtistAsync(name, ct).ConfigureAwait(false);
+            // Exact artist only: a near match would download someone else's discography.
+            if (artist == null || ArtistNames.Key(artist.Name) != key)
+            {
+                _logger.LogInformation("discographie : artiste « {Name} » introuvable dans le catalogue", name);
+            }
+            else
+            {
+                var albums = (await _catalog.ArtistAlbumsAsync(artist.Id, ct).ConfigureAwait(false))
+                    .Where(a => a.Type != "compile")
+                    .OrderBy(a => a.Type switch { "album" => 0, "ep" => 1, _ => 2 })
+                    .ToList();
+                var seenTitles = new HashSet<string>();
+                var queued = 0;
+                foreach (var summary in albums)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (!seenTitles.Add(SyncController.Normalize(CleanTitle(summary.Title)))) continue;
+                    CatalogAlbum album;
+                    try { album = await _catalog.AlbumAsync(summary.Id, ct).ConfigureAwait(false); }
+                    catch (Exception error) when (error is not OperationCanceledException) { continue; }
+                    // Singles already on an album, or tracks already in the library, are skipped.
+                    var wanted = album.Tracks.Where(t => !seenTitles.Contains("t:" + SyncController.Normalize(CleanTitle(t.Title)))
+                            && SyncController.MatchLocal(_library, t.Title, t.Artist.Length > 0 ? t.Artist : artist.Name) == null)
+                        .ToList();
+                    foreach (var t in album.Tracks) seenTitles.Add("t:" + SyncController.Normalize(CleanTitle(t.Title)));
+                    foreach (var t in wanted)
+                    {
+                        if (t.Album.Length == 0) t.Album = album.Title;
+                        if (t.Cover.Length == 0) t.Cover = album.Cover;
+                        if (t.AlbumId.Length == 0) t.AlbumId = album.Id;
+                    }
+                    queued += _music.Enqueue(wanted);
+                }
+                _logger.LogInformation("discographie : « {Name} », {Albums} sorties, {Tracks} titres mis en téléchargement", artist.Name, albums.Count, queued);
+            }
+            lock (_gate)
+            {
+                ArtistsDone[key] = DateTime.UtcNow;
+                File.WriteAllText(ArtistsPath, JsonSerializer.Serialize(ArtistsDone, Options));
+            }
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            _logger.LogWarning("discographie : échec pour « {Name} » : {Message}", name, error.Message);
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken).ConfigureAwait(false); }
@@ -143,7 +236,7 @@ public sealed class PendingMusicService : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (Exception error) { _logger.LogWarning("pending: pass failed: {Message}", error.Message); }
             bool busy;
-            lock (_gate) busy = _items.Count > 0;
+            lock (_gate) busy = _items.Count > 0 || _artistQueue.Count > 0;
             try { await _wake.WaitAsync(busy ? TimeSpan.FromSeconds(30) : TimeSpan.FromMinutes(5), stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
@@ -204,7 +297,7 @@ public sealed class PendingMusicService : BackgroundService
             if (track.State == "disabled" && LidarrConfigured) { track.State = "queued"; changed = true; }
             if (track.State != "queued") continue;
             // Lidarr is the last resort: only once Nflix could not fetch the track itself.
-            if (track.VideoId.Length > 0 && !(track.DlState == "failed" && track.DlTries >= MaxDirectTries)) continue;
+            if (!(track.DlState == "failed" && track.DlTries >= MaxDirectTries)) continue;
             try
             {
                 await RequestAsync(track, requestedAlbums, ct).ConfigureAwait(false);
@@ -220,6 +313,7 @@ public sealed class PendingMusicService : BackgroundService
         }
         if (changed) Save();
         await DirectDownloadsAsync(ct).ConfigureAwait(false);
+        await DiscographyStepAsync(ct).ConfigureAwait(false);
     }
 
     private bool InPlaylist(Guid playlistId, Guid itemId) =>
@@ -278,7 +372,7 @@ public sealed class PendingMusicService : BackgroundService
     {
         List<PendingTrack> due;
         lock (_gate)
-            due = _items.Where(t => t.VideoId.Length > 0 && t.DlState is "" or "failed"
+            due = _items.Where(t => t.DlState is "" or "failed"
                     && !(t.DlState == "failed" && (t.DlTries >= MaxDirectTries || t.DlNextUtc > DateTime.UtcNow)))
                 .OrderBy(t => t.Position).ToList();
         if (due.Count == 0) return;
@@ -307,9 +401,15 @@ public sealed class PendingMusicService : BackgroundService
         {
             var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false)
                 ?? await _catalog.FindTrackAsync(track.Artist, CleanTitle(track.Title), ct).ConfigureAwait(false);
-            var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = CleanTitle(track.Title), Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
+            var catalogTrack = hit ?? new CatalogTrack { Id = "v" + (track.VideoId.Length > 0 ? track.VideoId : track.Id), Title = CleanTitle(track.Title), Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromMinutes(8));
+            // Links from Deezer or Spotify carry no audio id: find the track first.
+            if (track.VideoId.Length == 0)
+            {
+                track.VideoId = await _music.ResolveAsync(catalogTrack, cts.Token).ConfigureAwait(false);
+                Save();
+            }
             var audioId = track.VideoId;
             if (track.NeedOtherSource)
             {

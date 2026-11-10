@@ -89,6 +89,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Secret of the Google OAuth client.</summary>
     public string GoogleClientSecret { get; set; } = "";
 
+    /// <summary>Downloads the whole discography (albums, EPs, singles) of every artist of an imported playlist.</summary>
+    public bool DownloadDiscographies { get; set; } = true;
+
     /// <summary>Lidarr base URL used to fetch the tracks of imported playlists that are not in the library yet.</summary>
     public string LidarrUrl { get; set; } = "";
 

@@ -621,6 +621,12 @@ public class SyncController : ControllerBase
             return StatusCode(400, new { message = "Le service en ligne a renvoyé une erreur." });
         }
 
+        return Ok(MatchAll(tracks, ""));
+    }
+
+    /// <summary>Splits a fetched track list into library hits and missing tracks, and queues the artists' discographies.</summary>
+    private object MatchAll(List<TrackRef> tracks, string name)
+    {
         var matched = new List<object>();
         var missing = new List<object>();
         for (var position = 0; position < tracks.Count; position++)
@@ -632,7 +638,129 @@ public class SyncController : ControllerBase
             else
                 missing.Add(new { title = track.Title, artist = track.Artist, videoId = track.VideoId, position });
         }
-        return Ok(new { total = tracks.Count, matched, missing });
+        _pending.QueueArtists(tracks.Select(t => t.Artist));
+        return new { name, total = tracks.Count, matched, missing };
+    }
+
+    public sealed class UrlImportRequest
+    {
+        public string UserId { get; set; } = "";
+        public string Url { get; set; } = "";
+    }
+
+    private static readonly string[] LinkHosts =
+    {
+        "deezer.com", "www.deezer.com", "link.deezer.com", "deezer.page.link", "dzr.page.link",
+        "open.spotify.com", "spotify.link", "spotify.app.link",
+        "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
+    };
+
+    private static bool LinkAllowed(Uri uri) =>
+        uri.Scheme == Uri.UriSchemeHttps && LinkHosts.Contains(uri.Host.ToLowerInvariant());
+
+    /**
+     * Imports a public playlist (or album) from its share link, with no account and no developer key:
+     * Deezer public API, Spotify embed page, YouTube / YouTube Music through the downloader.
+     */
+    [HttpPost("import-url")]
+    public async Task<IActionResult> ImportUrl([FromBody] UrlImportRequest request, CancellationToken ct)
+    {
+        if (IsOtherUser(request.UserId)) return Forbid();
+        if (!Uri.TryCreate((request.Url ?? "").Trim(), UriKind.Absolute, out var uri) || !LinkAllowed(uri))
+            return BadRequest(new { message = "Lien non reconnu : collez le lien de partage d'une playlist Deezer, Spotify ou YouTube Music." });
+        try
+        {
+            // Short share links redirect to the real page.
+            if (uri.Host is "link.deezer.com" or "deezer.page.link" or "dzr.page.link" or "spotify.link" or "spotify.app.link" or "youtu.be")
+            {
+                using var head = new HttpRequestMessage(HttpMethod.Get, uri);
+                head.Headers.UserAgent.ParseAdd("Mozilla/5.0");
+                using var res = await Http.SendAsync(head, HttpCompletionOption.ResponseHeadersRead, ct);
+                var final = res.RequestMessage?.RequestUri;
+                if (final == null || !LinkAllowed(final)) return BadRequest(new { message = "Lien de partage non reconnu." });
+                uri = final;
+            }
+            var path = uri.AbsolutePath;
+            var tracks = new List<TrackRef>();
+            var name = "";
+            System.Text.RegularExpressions.Match m;
+            if (uri.Host.EndsWith("deezer.com", StringComparison.Ordinal) && (m = System.Text.RegularExpressions.Regex.Match(path, @"/(playlist|album)/(\d{1,15})")).Success)
+            {
+                var kind = m.Groups[1].Value;
+                var id = m.Groups[2].Value;
+                using (var info = JsonDocument.Parse(await Http.GetStringAsync("https://api.deezer.com/" + kind + "/" + id, ct)))
+                {
+                    if (info.RootElement.TryGetProperty("error", out _)) return BadRequest(new { message = "Playlist Deezer privée ou introuvable." });
+                    name = info.RootElement.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                }
+                for (var index = 0; index < 2000; index += 100)
+                {
+                    using var page = JsonDocument.Parse(await Http.GetStringAsync("https://api.deezer.com/" + kind + "/" + id + "/tracks?limit=100&index=" + index, ct));
+                    if (!page.RootElement.TryGetProperty("data", out var data)) break;
+                    foreach (var tr in data.EnumerateArray())
+                    {
+                        var title = tr.TryGetProperty("title", out var tt) ? tt.GetString() ?? "" : "";
+                        var artist = tr.TryGetProperty("artist", out var ar) && ar.TryGetProperty("name", out var an) ? an.GetString() ?? "" : "";
+                        if (title.Length > 0) tracks.Add(new TrackRef { Title = title, Artist = artist });
+                    }
+                    if (data.GetArrayLength() < 100) break;
+                }
+            }
+            else if (uri.Host == "open.spotify.com" && (m = System.Text.RegularExpressions.Regex.Match(path, @"/(playlist|album)/([A-Za-z0-9]{22})")).Success)
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, "https://open.spotify.com/embed/" + m.Groups[1].Value + "/" + m.Groups[2].Value);
+                req.Headers.UserAgent.ParseAdd("Mozilla/5.0");
+                using var res = await Http.SendAsync(req, ct);
+                var html = await res.Content.ReadAsStringAsync(ct);
+                var json = System.Text.RegularExpressions.Regex.Match(html, "<script id=\"__NEXT_DATA__\" type=\"application/json\">(.*?)</script>", System.Text.RegularExpressions.RegexOptions.Singleline);
+                if (!json.Success) return BadRequest(new { message = "Playlist Spotify privée ou introuvable." });
+                using var doc = JsonDocument.Parse(json.Groups[1].Value);
+                var entity = doc.RootElement.GetProperty("props").GetProperty("pageProps").GetProperty("state").GetProperty("data").GetProperty("entity");
+                name = entity.TryGetProperty("name", out var n) ? n.GetString() ?? "" : entity.TryGetProperty("title", out var n2) ? n2.GetString() ?? "" : "";
+                if (entity.TryGetProperty("trackList", out var list))
+                    foreach (var tr in list.EnumerateArray())
+                    {
+                        var title = tr.TryGetProperty("title", out var tt) ? tt.GetString() ?? "" : "";
+                        var artist = tr.TryGetProperty("subtitle", out var st) ? (st.GetString() ?? "").Replace("\u00a0", " ") : "";
+                        if (title.Length > 0) tracks.Add(new TrackRef { Title = title, Artist = artist });
+                    }
+            }
+            else if (uri.Host.Contains("youtube", StringComparison.Ordinal) && System.Web.HttpUtility.ParseQueryString(uri.Query)["list"] is { } listId
+                && System.Text.RegularExpressions.Regex.IsMatch(listId, "^[A-Za-z0-9_-]{2,64}$"))
+            {
+                var output = await YtMusicService.RunAsync(a =>
+                {
+                    a.Add("--flat-playlist"); a.Add("-J"); a.Add("--no-warnings");
+                    a.Add("https://music.youtube.com/playlist?list=" + listId);
+                }, ct);
+                using var doc = JsonDocument.Parse(output);
+                name = doc.RootElement.TryGetProperty("title", out var n) ? (n.GetString() ?? "").Replace("Album - ", "") : "";
+                if (doc.RootElement.TryGetProperty("entries", out var entries))
+                    foreach (var e in entries.EnumerateArray())
+                    {
+                        var title = e.TryGetProperty("title", out var tt) ? tt.GetString() ?? "" : "";
+                        var owner = e.TryGetProperty("channel", out var ch) && ch.ValueKind == JsonValueKind.String ? ch.GetString() ?? ""
+                            : e.TryGetProperty("uploader", out var up) && up.ValueKind == JsonValueKind.String ? up.GetString() ?? "" : "";
+                        var videoId = e.TryGetProperty("id", out var vid) ? vid.GetString() ?? "" : "";
+                        if (title.Length == 0 || title is "[Deleted video]" or "[Private video]") continue;
+                        var artist = owner.Replace(" - Topic", "").Trim();
+                        var dash = title.IndexOf(" - ", StringComparison.Ordinal);
+                        if (dash > 0 && !owner.EndsWith(" - Topic", StringComparison.Ordinal)) { artist = title[..dash].Trim(); title = title[(dash + 3)..].Trim(); }
+                        tracks.Add(new TrackRef { Title = title, Artist = artist, VideoId = CallerIdentity.IsVideoId(videoId) ? videoId : "" });
+                    }
+            }
+            else
+            {
+                return BadRequest(new { message = "Ce lien ne pointe pas vers une playlist ou un album." });
+            }
+            if (tracks.Count == 0) return BadRequest(new { message = "Playlist vide, privée ou introuvable." });
+            return Ok(MatchAll(tracks, name.Trim().Length > 0 ? name.Trim() : "Playlist importée"));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            _logger.LogWarning("sync: link import failed: {Message}", error.Message);
+            return BadRequest(new { message = "Impossible de lire cette playlist pour le moment." });
+        }
     }
 
     /// <summary>
