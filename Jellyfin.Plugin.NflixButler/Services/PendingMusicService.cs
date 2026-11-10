@@ -174,8 +174,12 @@ public sealed class PendingMusicService : BackgroundService
                     int before;
                     lock (_gate) before = _items.Count(x => x.PlaylistId == track.PlaylistId && x.Position < track.Position);
                     // Original order: the slot after every earlier track already in the playlist.
-                    try { await _playlists.AddItemToPlaylistAsync(pid, new[] { local.Id }, Math.Max(0, track.Position - before), uid).ConfigureAwait(false); }
-                    catch (ArgumentException) { await _playlists.AddItemToPlaylistAsync(pid, new[] { local.Id }, null, uid).ConfigureAwait(false); }
+                    // Never twice: a positioned add can throw after it has already written the entry.
+                    if (!InPlaylist(pid, local.Id))
+                    {
+                        try { await _playlists.AddItemToPlaylistAsync(pid, new[] { local.Id }, Math.Max(0, track.Position - before), uid).ConfigureAwait(false); }
+                        catch (ArgumentException) when (!InPlaylist(pid, local.Id)) { await _playlists.AddItemToPlaylistAsync(pid, new[] { local.Id }, null, uid).ConfigureAwait(false); }
+                    }
                     lock (_gate) _items.RemoveAll(x => x.Id == track.Id);
                     changed = true;
                     _logger.LogInformation("pending: « {Title} » ajouté à sa playlist depuis la bibliothèque", track.Title);
@@ -211,6 +215,10 @@ public sealed class PendingMusicService : BackgroundService
         if (changed) Save();
         await DirectDownloadsAsync(ct).ConfigureAwait(false);
     }
+
+    private bool InPlaylist(Guid playlistId, Guid itemId) =>
+        _library.GetItemById(playlistId) is MediaBrowser.Controller.Playlists.Playlist playlist
+        && playlist.LinkedChildren.Any(c => c.ItemId == itemId);
 
     private const int MaxDirectTries = 3;
 
