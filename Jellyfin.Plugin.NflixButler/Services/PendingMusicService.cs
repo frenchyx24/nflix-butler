@@ -46,6 +46,7 @@ public sealed class PendingTrack
     public string DlState { get; set; } = "";
     public int DlTries { get; set; }
     public bool SourceRetried { get; set; }
+    public string DlFile { get; set; } = "";
     public DateTime DlNextUtc { get; set; } = DateTime.MinValue;
 }
 
@@ -160,7 +161,11 @@ public sealed class PendingMusicService : BackgroundService
                 changed = true;
                 continue;
             }
-            var local = SyncController.MatchLocal(_library, track.Title, track.Artist);
+            // A track Nflix downloaded itself is found by its file; others by artist + title.
+            var local = track.DlFile.Length > 0 ? _library.FindByPath(track.DlFile, false) : null;
+            local ??= SyncController.MatchLocal(_library, track.Title, track.Artist);
+            if (local == null && CleanTitle(track.Title) is var clean && clean != track.Title)
+                local = SyncController.MatchLocal(_library, clean, track.Artist);
             if (local != null && Guid.TryParse(track.PlaylistId, out var pid) && Guid.TryParse(track.UserId, out var uid))
             {
                 try
@@ -208,6 +213,15 @@ public sealed class PendingMusicService : BackgroundService
 
     private const int MaxDirectTries = 3;
 
+    /// <summary>Title without "(2014 Remaster)", "[Official Video]", "feat." credits or "Artist | … | Music Video" noise.</summary>
+    internal static string CleanTitle(string title)
+    {
+        var t = System.Text.RegularExpressions.Regex.Replace(title, @"\s*[\(\[][^\)\]]*[\)\]]", "");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"\s+(feat\.?|ft\.?|featuring)\s.*$", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (t.Contains('|')) t = t.Split('|').Select(x => x.Trim()).Where(x => x.Length > 0).OrderByDescending(x => x.Length).First();
+        return t.Trim().Length > 1 ? t.Trim() : title;
+    }
+
     /// <summary>
     /// Lidarr only finds whole albums on its indexers; a track it cannot fetch within 20 minutes
     /// (no source, failed or blocked import) is downloaded by Nflix itself from its exact audio id.
@@ -250,6 +264,7 @@ public sealed class PendingMusicService : BackgroundService
                 }
                 var file = await _music.DownloadWithAudioAsync(catalogTrack, audioId, cts.Token).ConfigureAwait(false);
                 track.DlState = "done";
+                track.DlFile = file;
                 _logger.LogInformation("pending: « {Title} » téléchargé directement ({File})", track.Title, file);
             }
             catch (Exception error) when (!ct.IsCancellationRequested)
