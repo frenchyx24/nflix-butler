@@ -47,6 +47,7 @@ public sealed class PendingTrack
     public int DlTries { get; set; }
     public bool SourceRetried { get; set; }
     public bool FreshSource { get; set; }
+    public bool NeedOtherSource { get; set; }
     public string DlFile { get; set; } = "";
     public DateTime DlNextUtc { get; set; } = DateTime.MinValue;
 }
@@ -133,14 +134,17 @@ public sealed class PendingMusicService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try { await Task.Delay(TimeSpan.FromSeconds(60), stoppingToken).ConfigureAwait(false); }
+        try { await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken).ConfigureAwait(false); }
         catch (OperationCanceledException) { return; }
         while (!stoppingToken.IsCancellationRequested)
         {
+            await UpdateDownloaderAsync(stoppingToken).ConfigureAwait(false);
             try { await RunOnceAsync(stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
             catch (Exception error) { _logger.LogWarning("pending: pass failed: {Message}", error.Message); }
-            try { await _wake.WaitAsync(TimeSpan.FromMinutes(2), stoppingToken).ConfigureAwait(false); }
+            bool busy;
+            lock (_gate) busy = _items.Count > 0;
+            try { await _wake.WaitAsync(busy ? TimeSpan.FromSeconds(30) : TimeSpan.FromMinutes(5), stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
     }
@@ -199,6 +203,8 @@ public sealed class PendingMusicService : BackgroundService
             if (track.NextUtc > DateTime.UtcNow) continue;
             if (track.State == "disabled" && LidarrConfigured) { track.State = "queued"; changed = true; }
             if (track.State != "queued") continue;
+            // Lidarr is the last resort: only once Nflix could not fetch the track itself.
+            if (track.VideoId.Length > 0 && !(track.DlState == "failed" && track.DlTries >= MaxDirectTries)) continue;
             try
             {
                 await RequestAsync(track, requestedAlbums, ct).ConfigureAwait(false);
@@ -220,7 +226,7 @@ public sealed class PendingMusicService : BackgroundService
         _library.GetItemById(playlistId) is MediaBrowser.Controller.Playlists.Playlist playlist
         && playlist.LinkedChildren.Any(c => c.ItemId == itemId);
 
-    private const int MaxDirectTries = 3;
+    private const int MaxDirectTries = 4;
 
     /// <summary>Title without "(2014 Remaster)", "[Official Video]", "feat." credits or "Artist | … | Music Video" noise.</summary>
     internal static string CleanTitle(string title)
@@ -235,63 +241,102 @@ public sealed class PendingMusicService : BackgroundService
     /// Lidarr only finds whole albums on its indexers; a track it cannot fetch within 20 minutes
     /// (no source, failed or blocked import) is downloaded by Nflix itself from its exact audio id.
     /// </summary>
+    private DateTime _updatedUtc = DateTime.MinValue;
+
+    /// <summary>YouTube changes often: the downloader updates itself once a day (standalone binary only).</summary>
+    private async Task UpdateDownloaderAsync(CancellationToken ct)
+    {
+        const string bin = "/config/bin/yt-dlp";
+        if (DateTime.UtcNow - _updatedUtc < TimeSpan.FromHours(24) || !File.Exists(bin)) return;
+        _updatedUtc = DateTime.UtcNow;
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(bin)
+            {
+                ArgumentList = { "-U" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            });
+            if (process == null) return;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromMinutes(3));
+            var output = await process.StandardOutput.ReadToEndAsync(cts.Token).ConfigureAwait(false);
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            var line = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "";
+            _logger.LogInformation("pending: mise à jour du téléchargeur : {Line}", line.Trim());
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("pending: downloader update failed: {Message}", error.Message);
+        }
+    }
+
+    private const int Workers = 3;
+
     private async Task DirectDownloadsAsync(CancellationToken ct)
     {
-        List<PendingTrack> snapshot;
-        lock (_gate) snapshot = _items.ToList();
-        var status = await StatusAsync(snapshot, ct).ConfigureAwait(false);
-        var started = 0;
-        foreach (var track in snapshot)
+        List<PendingTrack> due;
+        lock (_gate)
+            due = _items.Where(t => t.VideoId.Length > 0 && t.DlState is "" or "failed"
+                    && !(t.DlState == "failed" && (t.DlTries >= MaxDirectTries || t.DlNextUtc > DateTime.UtcNow)))
+                .OrderBy(t => t.Position).ToList();
+        if (due.Count == 0) return;
+        // Several tracks at once: each one is a separate small download.
+        using var gate = new SemaphoreSlim(Workers);
+        var tasks = due.Select(async track =>
         {
-            if (started >= 5) break;
-            if (track.VideoId.Length == 0 || track.DlState is "running" or "done") continue;
-            if (track.DlState == "failed" && (track.DlTries >= MaxDirectTries || track.DlNextUtc > DateTime.UtcNow)) continue;
-            var kind = status.TryGetValue(track.Id, out var st) ? st.Kind : "";
-            // Lidarr gets 20 minutes when idle, 2 hours while it is really downloading; then Nflix fetches the track.
-            var since = DateTime.UtcNow - (track.RequestedUtc == default ? track.AddedUtc : track.RequestedUtc);
-            var active = kind is "downloading" or "importing" or "queued";
-            var lidarrStuck = kind is "nosource" or "failed" or "blocked" or "online"
-                || (!active && since > TimeSpan.FromMinutes(20))
-                || since > TimeSpan.FromHours(2);
-            if (!lidarrStuck) continue;
-            started++;
-            track.DlState = "running";
-            Save();
-            try
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try { await DirectOneAsync(track, ct).ConfigureAwait(false); }
+            finally { gate.Release(); }
+        }).ToList();
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+        _wake.Release();
+    }
+
+    private static bool Gone(string message) =>
+        message.Contains("unavailable", StringComparison.OrdinalIgnoreCase) || message.Contains("not available", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("private", StringComparison.OrdinalIgnoreCase) || message.Contains("removed", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("autre source", StringComparison.OrdinalIgnoreCase);
+
+    private async Task DirectOneAsync(PendingTrack track, CancellationToken ct)
+    {
+        track.DlState = "running";
+        Save();
+        try
+        {
+            var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false)
+                ?? await _catalog.FindTrackAsync(track.Artist, CleanTitle(track.Title), ct).ConfigureAwait(false);
+            var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = CleanTitle(track.Title), Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromMinutes(8));
+            var audioId = track.VideoId;
+            if (track.NeedOtherSource)
             {
-                var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false)
-                    ?? await _catalog.FindTrackAsync(track.Artist, CleanTitle(track.Title), ct).ConfigureAwait(false);
-                var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = CleanTitle(track.Title), Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(TimeSpan.FromMinutes(10));
-                // After a failure the playlist's audio may be gone: look for another source of the same track.
-                var audioId = track.VideoId;
-                if (track.DlTries > 0)
-                {
-                    _music.Store.ForgetCatalogVideo(catalogTrack.Id);
-                    try
-                    {
-                        var other = await _music.ResolveAsync(catalogTrack, cts.Token).ConfigureAwait(false);
-                        if (other != track.VideoId) audioId = other;
-                    }
-                    catch (Exception error) when (error is not OperationCanceledException) { _logger.LogDebug("pending: no other source for {Title}: {Message}", track.Title, error.Message); }
-                    if (audioId == track.VideoId) throw new InvalidOperationException("aucune autre source");
-                    _music.Store.ForgetCatalogVideo(catalogTrack.Id);
-                }
-                var file = await _music.DownloadWithAudioAsync(catalogTrack, audioId, cts.Token).ConfigureAwait(false);
-                track.DlState = "done";
-                track.DlFile = file;
-                _logger.LogInformation("pending: « {Title} » téléchargé directement ({File})", track.Title, file);
+                // The playlist's audio is gone: another source of the same track.
+                _music.Store.ForgetCatalogVideo(catalogTrack.Id);
+                string? other = null;
+                try { other = await _music.ResolveAsync(catalogTrack, cts.Token).ConfigureAwait(false); }
+                catch (Exception error) when (error is not OperationCanceledException) { _logger.LogDebug("pending: no other source for {Title}: {Message}", track.Title, error.Message); }
+                _music.Store.ForgetCatalogVideo(catalogTrack.Id);
+                if (other == null || other == track.VideoId) throw new InvalidOperationException("aucune autre source");
+                audioId = other;
             }
-            catch (Exception error) when (!ct.IsCancellationRequested)
-            {
-                track.DlTries++;
-                track.DlState = "failed";
-                track.DlNextUtc = DateTime.UtcNow.AddMinutes(10 * track.DlTries * track.DlTries);
-                _logger.LogWarning("pending: direct download {Try}/{Max} failed for {Title}: {Message}", track.DlTries, MaxDirectTries, track.Title, error.Message);
-            }
-            Save();
+            var file = await _music.DownloadWithAudioAsync(catalogTrack, audioId, cts.Token).ConfigureAwait(false);
+            track.DlState = "done";
+            track.DlFile = file;
+            _logger.LogInformation("pending: « {Title} » téléchargé directement ({File})", track.Title, file);
         }
+        catch (Exception error) when (!ct.IsCancellationRequested)
+        {
+            track.DlTries++;
+            track.DlState = "failed";
+            var gone = Gone(error.Message);
+            if (gone && !track.NeedOtherSource) { track.NeedOtherSource = true; track.DlNextUtc = DateTime.UtcNow; }
+            else track.DlNextUtc = DateTime.UtcNow.AddMinutes(track.DlTries switch { 1 => 1, 2 => 5, _ => 20 });
+            _logger.LogWarning("pending: direct download {Try}/{Max} failed for {Title}: {Message}", track.DlTries, MaxDirectTries, track.Title, error.Message);
+        }
+        Save();
     }
 
     private static HttpRequestMessage LidarrRequest(HttpMethod method, string path, JsonNode? body = null)
@@ -428,7 +473,7 @@ public sealed class PendingMusicService : BackgroundService
         }
         foreach (var t in tracks)
         {
-            if (t.DlState == "running") { result[t.Id] = new Progress("Téléchargement direct en cours", -1, "direct"); continue; }
+            if (t.DlState == "running") { result[t.Id] = new Progress("Téléchargement en cours", -1, "direct"); continue; }
             if (t.DlState == "done") { result[t.Id] = new Progress("Ajout à la bibliothèque", 100, "files"); continue; }
             if (t.State == "requested" && _queueCache.TryGetValue(t.LidarrAlbumId, out var q)) { result[t.Id] = q; continue; }
             if (t.State == "requested" && t.LidarrAlbumId > 0)
@@ -442,10 +487,10 @@ public sealed class PendingMusicService : BackgroundService
                     ? new Progress("Recherche d'une source", -1, "searching")
                     : new Progress("Aucune source pour l'instant", -1, "nosource"),
                 "notfound" or "disabled" => new Progress("Lecture en ligne uniquement", -1, "online"),
-                _ => new Progress(t.Tries > 0 ? "Nouvel essai bientôt" : "En préparation", -1, "prep"),
+                _ => new Progress(t.Tries > 0 ? "Nouvel essai bientôt" : "En file de téléchargement", -1, "prep"),
             };
             // A failed direct download overrides the Lidarr wording with its own retry state.
-            if (t.DlState == "failed")
+            if (t.DlState == "failed" && !(t.DlTries >= MaxDirectTries && t.State == "requested"))
                 result[t.Id] = t.DlTries >= MaxDirectTries
                     ? new Progress("Lecture en ligne uniquement", -1, "online")
                     : new Progress("Nouvel essai du téléchargement (" + t.DlTries + "/" + MaxDirectTries + ")", -1, result[t.Id].Kind);
