@@ -746,6 +746,9 @@ public class SyncController : ControllerBase
                         var artist = owner.Replace(" - Topic", "").Trim();
                         var dash = title.IndexOf(" - ", StringComparison.Ordinal);
                         if (dash > 0 && !owner.EndsWith(" - Topic", StringComparison.Ordinal)) { artist = title[..dash].Trim(); title = title[(dash + 3)..].Trim(); }
+                        // Video titles carry noise: "(Official Video)", "[Lyrics]", "(Clip officiel)"…
+                        title = System.Text.RegularExpressions.Regex.Replace(title, @"\s*[\(\[][^\)\]]*(official|officiel|oficial|video|vidéo|lyrics?|paroles|audio|clip|visualizer|hd|4k)[^\)\]]*[\)\]]", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+                        if (title.Length == 0) continue;
                         tracks.Add(new TrackRef { Title = title, Artist = artist, VideoId = CallerIdentity.IsVideoId(videoId) ? videoId : "" });
                     }
             }
@@ -759,6 +762,8 @@ public class SyncController : ControllerBase
         catch (Exception error) when (error is not OperationCanceledException)
         {
             _logger.LogWarning("sync: link import failed: {Message}", error.Message);
+            if (error.Message.Contains("does not exist", StringComparison.OrdinalIgnoreCase) || error.Message.Contains("private", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { message = "Playlist privée : passez-la en « publique » ou « non répertoriée », ou liez votre compte musique." });
             return BadRequest(new { message = "Impossible de lire cette playlist pour le moment." });
         }
     }
