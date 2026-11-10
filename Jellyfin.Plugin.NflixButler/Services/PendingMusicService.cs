@@ -82,6 +82,12 @@ public sealed class PendingMusicService : BackgroundService
         _logger = logger;
         try { _items = File.Exists(_path) ? JsonSerializer.Deserialize<List<PendingTrack>>(File.ReadAllText(_path)) ?? new() : new(); }
         catch { _items = new(); }
+        // Discographies whose downloads a restart cut short resume (already fetched tracks are skipped).
+        foreach (var recent in ArtistsDone.Where(a => DateTime.UtcNow - a.Value < TimeSpan.FromDays(2)).Select(a => a.Key).ToList())
+        {
+            ArtistsDone.Remove(recent);
+            if (ArtistNamesSeen.TryGetValue(recent, out var name)) _artistQueue.Enqueue(name);
+        }
         // A download cut by a restart starts over.
         foreach (var t in _items.Where(t => t.DlState == "running")) t.DlState = "";
         // Tracks that failed every try on their first audio id get another round with a fresh source lookup.
@@ -135,8 +141,32 @@ public sealed class PendingMusicService : BackgroundService
 
     // ---- Discographies -------------------------------------------------------------------------
 
+    /// <summary>Alternate takes nobody asked for: whole records of these are skipped.</summary>
+    private static readonly System.Text.RegularExpressions.Regex VariantOnly = new(
+        @"drumless|instrumental|karaok|a ?cappella|acapella|sped ?up|slowed|8-?bit|lullaby|berceuse|piano version|commentary",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex Edition = new(
+        @"deluxe|edition|édition|remaster|anniversary|expanded|bonus|live|version|reissue|complete",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private string ArtistsPath => Path.Combine(Path.GetDirectoryName(_path)!, "artists.json");
     private Dictionary<string, DateTime>? _artistsDone;
+    private Dictionary<string, string>? _artistNames;
+
+    private string ArtistNamesPath => Path.Combine(Path.GetDirectoryName(_path)!, "artist-names.json");
+
+    /// <summary>Display name of each queued artist key, kept so an interrupted discography can resume.</summary>
+    private Dictionary<string, string> ArtistNamesSeen
+    {
+        get
+        {
+            if (_artistNames != null) return _artistNames;
+            try { _artistNames = File.Exists(ArtistNamesPath) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(ArtistNamesPath)) : null; }
+            catch { }
+            return _artistNames ??= new() { ["daftpunk"] = "Daft Punk" };
+        }
+    }
     private readonly Queue<string> _artistQueue = new();
 
     private Dictionary<string, DateTime> ArtistsDone
@@ -163,7 +193,9 @@ public sealed class PendingMusicService : BackgroundService
                 if (key.Length < 2 || _artistQueue.Any(q => ArtistNames.Key(q) == key)) continue;
                 if (ArtistsDone.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromDays(14)) continue;
                 _artistQueue.Enqueue(name);
+                ArtistNamesSeen[key] = name;
             }
+            try { File.WriteAllText(ArtistNamesPath, JsonSerializer.Serialize(ArtistNamesSeen, Options)); } catch { }
         }
         _wake.Release();
     }
@@ -186,8 +218,11 @@ public sealed class PendingMusicService : BackgroundService
             else
             {
                 var albums = (await _catalog.ArtistAlbumsAsync(artist.Id, ct).ConfigureAwait(false))
-                    .Where(a => a.Type != "compile")
+                    .Where(a => a.Type != "compile" && !VariantOnly.IsMatch(a.Title))
+                    // Originals first, so a later "Deluxe" or "Remastered" edition is recognised as the same record.
                     .OrderBy(a => a.Type switch { "album" => 0, "ep" => 1, _ => 2 })
+                    .ThenBy(a => Edition.IsMatch(a.Title) ? 1 : 0)
+                    .ThenBy(a => a.Year)
                     .ToList();
                 var seenTitles = new HashSet<string>();
                 var queued = 0;
