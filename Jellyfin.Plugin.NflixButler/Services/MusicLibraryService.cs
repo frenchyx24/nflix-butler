@@ -246,7 +246,9 @@ public sealed class MusicLibraryService
         var canonical = CanonicalArtist(root, primary);
         if (canonical != null && canonical != primary) track.Artist = canonical + track.Artist[Math.Min(primary.Length, track.Artist.Length)..];
         var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
-        var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
+        // No known album: the track is filed as its own single, never under a generic folder.
+        if (string.IsNullOrWhiteSpace(track.Album) || track.Album == "Titres") track.Album = PendingMusicService.CleanTitle(track.Title);
+        var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Single")));
         if (!albumDir.StartsWith(root + "/", StringComparison.Ordinal)) throw new InvalidOperationException("Chemin refusé.");
         Directory.CreateDirectory(albumDir);
 
@@ -541,7 +543,9 @@ public sealed class MusicLibraryService
                 var canonicalName = CanonicalArtist(root, primaryName);
                 if (canonicalName != null && canonicalName != primaryName) track.Artist = canonicalName + track.Artist[Math.Min(primaryName.Length, track.Artist.Length)..];
                 var artistDir = Path.GetFullPath(Path.Combine(root, Safe(ArtistNames.Primary(track.Artist), "Artiste inconnu")));
-                var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Titres")));
+                // No known album: the track is filed as its own single, never under a generic folder.
+        if (string.IsNullOrWhiteSpace(track.Album) || track.Album == "Titres") track.Album = PendingMusicService.CleanTitle(track.Title);
+        var albumDir = Path.GetFullPath(Path.Combine(artistDir, Safe(track.Album, "Single")));
                 if (!albumDir.StartsWith(root + "/", StringComparison.Ordinal)) continue;
                 Directory.CreateDirectory(albumDir);
                 var prefix = track.TrackNumber > 0 ? track.TrackNumber.ToString("00", System.Globalization.CultureInfo.InvariantCulture) + " - " : "";

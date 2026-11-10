@@ -311,7 +311,9 @@ public class MusicController : ControllerBase
                 if (albums != null) ownLatest.AddRange(albums.Where(al => string.CompareOrdinal(al.Year, minYear) >= 0).Take(2));
             }
             var newAlbums = ownLatest.OrderByDescending(al => al.Year).Concat(await Safe(releases) ?? new List<CatalogAlbum>())
-                .GroupBy(al => al.Id).Select(g => g.First()).Take(20).ToList();
+                .GroupBy(al => al.Id).Select(g => g.First())
+                .GroupBy(al => ArtistNames.Key(al.Artist) + "|" + SyncController.Normalize(PendingMusicService.CleanTitle(al.Title))).Select(g => g.First())
+                .Take(20).ToList();
             if (newAlbums is { Count: > 0 })
                 sections.Add(new { key = "releases", title = "Nouveautés", subtitle = "Les sorties du moment", type = "albums", albums = newAlbums.Select(AlbumJson) });
 
