@@ -46,6 +46,7 @@ public sealed class PendingTrack
     public string DlState { get; set; } = "";
     public int DlTries { get; set; }
     public bool SourceRetried { get; set; }
+    public bool FreshSource { get; set; }
     public string DlFile { get; set; } = "";
     public DateTime DlNextUtc { get; set; } = DateTime.MinValue;
 }
@@ -83,7 +84,7 @@ public sealed class PendingMusicService : BackgroundService
         // A download cut by a restart starts over.
         foreach (var t in _items.Where(t => t.DlState == "running")) t.DlState = "";
         // Tracks that failed every try on their first audio id get another round with a fresh source lookup.
-        foreach (var t in _items.Where(t => t.DlState == "failed" && t.DlTries >= 3 && !t.SourceRetried)) { t.DlTries = 1; t.DlNextUtc = DateTime.MinValue; t.SourceRetried = true; }
+        foreach (var t in _items.Where(t => t.DlState == "failed" && !t.FreshSource)) { t.DlTries = 1; t.DlNextUtc = DateTime.MinValue; t.FreshSource = true; }
     }
 
     private static Configuration.PluginConfiguration Config => Plugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
@@ -250,17 +251,24 @@ public sealed class PendingMusicService : BackgroundService
             Save();
             try
             {
-                var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false);
-                var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = track.Title, Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
+                var hit = await _catalog.FindTrackAsync(track.Artist, track.Title, ct).ConfigureAwait(false)
+                    ?? await _catalog.FindTrackAsync(track.Artist, CleanTitle(track.Title), ct).ConfigureAwait(false);
+                var catalogTrack = hit ?? new CatalogTrack { Id = "v" + track.VideoId, Title = CleanTitle(track.Title), Artist = track.Artist, Album = track.Album, Cover = track.Cover, Duration = track.Duration };
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromMinutes(10));
                 // After a failure the playlist's audio may be gone: look for another source of the same track.
                 var audioId = track.VideoId;
-                if (track.DlTries > 0 && hit != null)
+                if (track.DlTries > 0)
                 {
-                    if (_music.Store.CatalogVideo(hit.Id) == track.VideoId) _music.Store.ForgetCatalogVideo(hit.Id);
-                    try { audioId = await _music.ResolveAsync(hit, cts.Token).ConfigureAwait(false); }
+                    _music.Store.ForgetCatalogVideo(catalogTrack.Id);
+                    try
+                    {
+                        var other = await _music.ResolveAsync(catalogTrack, cts.Token).ConfigureAwait(false);
+                        if (other != track.VideoId) audioId = other;
+                    }
                     catch (Exception error) when (error is not OperationCanceledException) { _logger.LogDebug("pending: no other source for {Title}: {Message}", track.Title, error.Message); }
+                    if (audioId == track.VideoId) throw new InvalidOperationException("aucune autre source");
+                    _music.Store.ForgetCatalogVideo(catalogTrack.Id);
                 }
                 var file = await _music.DownloadWithAudioAsync(catalogTrack, audioId, cts.Token).ConfigureAwait(false);
                 track.DlState = "done";
