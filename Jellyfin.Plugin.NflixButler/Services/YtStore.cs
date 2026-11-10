@@ -230,6 +230,11 @@ public sealed class YtStore
         lock (_gate) { (State.CatalogVideo ??= new(StringComparer.Ordinal))[trackId] = videoId; }
     }
 
+    public void ForgetCatalogVideo(string trackId)
+    {
+        lock (_gate) { State.CatalogVideo?.Remove(trackId); }
+    }
+
     public string? CatalogFile(string trackId)
     {
         lock (_gate) { return State.CatalogFiles != null && State.CatalogFiles.TryGetValue(trackId, out var v) ? v : null; }
