@@ -101,6 +101,27 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Lidarr root folder for new artists; empty = the first root folder.</summary>
     public string LidarrRootFolder { get; set; } = "";
 
+    /// <summary>Marks films and episodes as watched when playback reaches the end credits.</summary>
+    public bool WatchedEnabled { get; set; } = true;
+
+    /// <summary>Films: remaining minutes that always count as the credits zone (zone = max(minutes, percent)).</summary>
+    public int WatchedFilmMinRemainingMinutes { get; set; } = 8;
+
+    /// <summary>Films: remaining share of the runtime, in percent, that counts as the credits zone.</summary>
+    public int WatchedFilmRemainingPercent { get; set; } = 10;
+
+    /// <summary>Episodes: remaining seconds that always count as the credits zone.</summary>
+    public int WatchedEpisodeMinRemainingSeconds { get; set; } = 150;
+
+    /// <summary>Episodes: remaining share of the runtime, in percent, that counts as the credits zone.</summary>
+    public int WatchedEpisodeRemainingPercent { get; set; } = 8;
+
+    /// <summary>Run a one-shot backfill of resume positions already in the credits zone at startup.</summary>
+    public bool WatchedBackfillOnStart { get; set; } = false;
+
+    /// <summary>Backfill only logs what it would mark, without marking anything.</summary>
+    public bool BackfillDryRun { get; set; } = true;
+
     /// <summary>Video containers the butler reacts to.</summary>
     public string[] VideoExtensions { get; set; } =
     {
