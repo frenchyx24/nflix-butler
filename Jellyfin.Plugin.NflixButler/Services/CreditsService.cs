@@ -32,12 +32,15 @@ namespace Jellyfin.Plugin.NflixButler.Services;
 /// </summary>
 public sealed class CreditsService
 {
-    private static readonly HttpClient Http = CreateClient();
-    private static readonly SemaphoreSlim Gate = new(3, 3);
-    private static readonly SemaphoreSlim LocalGate = new(1, 1);
+    // Static fields run in declaration order: timeouts must be initialised before the HttpClient
+    // that reads them. HttpTimeout was declared after Http, so CreateClient saw 00:00:00 and the
+    // static constructor threw TypeInitializationException on every credits lookup (fixed in 0.8.3).
     private static readonly TimeSpan HttpTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan NegativeRetry = TimeSpan.FromDays(7);
     private static readonly TimeSpan LocalTimeout = TimeSpan.FromMinutes(3);
+    private static readonly HttpClient Http = CreateClient();
+    private static readonly SemaphoreSlim Gate = new(3, 3);
+    private static readonly SemaphoreSlim LocalGate = new(1, 1);
 
     /// <summary>Cache format version. Bumped from 1 to 2 so stale <c>"Source":"none"</c> files are re-queried (0.8.1).</summary>
     private const int CacheSchema = 2;
@@ -67,7 +70,8 @@ public sealed class CreditsService
 
     private static HttpClient CreateClient()
     {
-        var client = new HttpClient { Timeout = HttpTimeout };
+        // Literal, not the field: a future reorder must not bring the static init crash back.
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "NflixButler/0.8 (https://github.com/frenchyx24/nflix-butler)");
         return client;
     }
