@@ -39,6 +39,9 @@ public sealed class CreditsService
     private static readonly TimeSpan NegativeRetry = TimeSpan.FromDays(7);
     private static readonly TimeSpan LocalTimeout = TimeSpan.FromMinutes(3);
 
+    /// <summary>Cache format version. Bumped from 1 to 2 so stale <c>"Source":"none"</c> files are re-queried (0.8.1).</summary>
+    private const int CacheSchema = 2;
+
     private readonly ILogger<CreditsService> _logger;
     private readonly IServiceProvider _services;
     private readonly ILibraryManager _library;
@@ -109,8 +112,19 @@ public sealed class CreditsService
 
         info.RuntimeTicks = item.RunTimeTicks ?? 0;
         info.Utc = DateTime.UtcNow;
+        info.Schema = CacheSchema;
+        if (info.StartTicks is not null)
+        {
+            await TryStoreSegmentAsync(item, info).ConfigureAwait(false);
+        }
+
         Save(item.Id, info);
         _memory[item.Id] = info;
+        _logger.LogInformation(
+            "credits: {Item} source={Source} start={Start}",
+            item.Name,
+            string.IsNullOrEmpty(info.Source) ? "none" : info.Source,
+            info.StartTicks is long ticks ? ticks.ToString(CultureInfo.InvariantCulture) : "none");
 
         if (info.StartTicks is null && !info.LocalTried && Config.CreditsLocalDetection && (item.RunTimeTicks ?? 0) > 0)
         {
@@ -122,6 +136,11 @@ public sealed class CreditsService
 
     private static bool IsFresh(CreditsInfo info, BaseItem item)
     {
+        if (info.Schema != CacheSchema)
+        {
+            return false;
+        }
+
         if (info.RuntimeTicks != (item.RunTimeTicks ?? 0))
         {
             return false;
@@ -134,6 +153,10 @@ public sealed class CreditsService
     {
         var runtime = Seconds(item.RunTimeTicks ?? 0);
         var half = (item.RunTimeTicks ?? 0) / 2;
+        var ids = ResolveIds(item);
+        _logger.LogDebug(
+            "Nflix Butler credits: ids for {Item} tmdb={Tmdb} tvdb={Tvdb} mal={Mal} anilist={AniList} season={Season} episode={Episode}",
+            item.Name, ids.Tmdb, ids.Tvdb, ids.Mal, ids.AniList, ids.Season, ids.Episode);
 
         // 1. Outro media segment written by Jellyfin or by a previous run of this service.
         if (await FromSegmentAsync(item, half, cancellationToken).ConfigureAwait(false) is { } segment)
@@ -149,13 +172,13 @@ public sealed class CreditsService
 
         // 3. AniSkip, anime episodes only.
         if (item is Episode episode && runtime > 0
-            && await FromAniSkipAsync(episode, runtime, cancellationToken).ConfigureAwait(false) is { } ani)
+            && await FromAniSkipAsync(episode, ids, runtime, cancellationToken).ConfigureAwait(false) is { } ani)
         {
             return ani;
         }
 
         // 4. TheIntroDB, films and series with a TMDB id.
-        if (runtime > 0 && await FromTheIntroDbAsync(item, runtime, cancellationToken).ConfigureAwait(false) is { } intro)
+        if (runtime > 0 && await FromTheIntroDbAsync(item, ids, runtime, cancellationToken).ConfigureAwait(false) is { } intro)
         {
             return intro;
         }
@@ -227,16 +250,21 @@ public sealed class CreditsService
         }
     }
 
-    private async Task<CreditsInfo?> FromAniSkipAsync(Episode episode, double runtime, CancellationToken cancellationToken)
+    private async Task<CreditsInfo?> FromAniSkipAsync(Episode episode, ItemIds ids, double lengthSeconds, CancellationToken cancellationToken)
     {
-        var malId = await ResolveMalIdAsync(episode, cancellationToken).ConfigureAwait(false);
+        var malId = ids.Mal;
+        if (malId is null && ids.AniList is int aniListId)
+        {
+            malId = await AniListToMalAsync(aniListId, cancellationToken).ConfigureAwait(false);
+        }
+
         if (malId is null)
         {
             return null;
         }
 
-        var number = episode.IndexNumber ?? 1;
-        var exact = (int)Math.Round(runtime);
+        var number = ids.Episode ?? episode.IndexNumber ?? 1;
+        var exact = (int)Math.Round(lengthSeconds);
         foreach (var length in new[] { exact, exact - 60, exact + 60 })
         {
             if (length <= 0)
@@ -249,7 +277,7 @@ public sealed class CreditsService
                 "https://api.aniskip.com/v2/skip-times/{0}/{1}?types=ed&types=mixed-ed&episodeLength={2}",
                 malId, number, length);
             var json = await GetStringAsync(url, cancellationToken).ConfigureAwait(false);
-            if (json is null || CreditsRules.PickAniSkip(json, runtime) is not { } times)
+            if (json is null || CreditsRules.PickAniSkip(json, lengthSeconds) is not { } times)
             {
                 continue;
             }
@@ -258,25 +286,6 @@ public sealed class CreditsService
         }
 
         return null;
-    }
-
-    private async Task<int?> ResolveMalIdAsync(BaseItem item, CancellationToken cancellationToken)
-    {
-        var direct = ProviderId(item, "MyAnimeList", "Mal");
-        var series = item is Episode ep && ep.SeriesId != Guid.Empty ? _library.GetItemById(ep.SeriesId) : null;
-        direct ??= ProviderId(series, "MyAnimeList", "Mal");
-        if (int.TryParse(direct, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && id > 0)
-        {
-            return id;
-        }
-
-        var aniList = ProviderId(item, "AniList") ?? ProviderId(series, "AniList");
-        if (!int.TryParse(aniList, NumberStyles.Integer, CultureInfo.InvariantCulture, out var aniListId) || aniListId <= 0)
-        {
-            return null;
-        }
-
-        return await AniListToMalAsync(aniListId, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<int?> AniListToMalAsync(int aniListId, CancellationToken cancellationToken)
@@ -312,17 +321,16 @@ public sealed class CreditsService
         return null;
     }
 
-    private async Task<CreditsInfo?> FromTheIntroDbAsync(BaseItem item, double runtime, CancellationToken cancellationToken)
+    private async Task<CreditsInfo?> FromTheIntroDbAsync(BaseItem item, ItemIds ids, double runtime, CancellationToken cancellationToken)
     {
-        var tmdb = ProviderId(item, "Tmdb", "TMDb");
-        if (!int.TryParse(tmdb, NumberStyles.Integer, CultureInfo.InvariantCulture, out var tmdbId) || tmdbId <= 0)
+        if (ids.Tmdb is not int tmdbId || tmdbId <= 0)
         {
             return null;
         }
 
         var (type, season, episode) = item switch
         {
-            Episode ep => ("tv", ep.ParentIndexNumber, ep.IndexNumber),
+            Episode => ("tv", ids.Season, ids.Episode),
             Movie => ("movie", null, null),
             _ => (string.Empty, null, null),
         };
@@ -673,6 +681,78 @@ public sealed class CreditsService
         }
 
         return null;
+    }
+
+    /// <summary>Provider ids and episode coordinates of one item, resolved across its parents.</summary>
+    private sealed record ItemIds(int? Tmdb, int? Tvdb, int? Mal, int? AniList, int? Season, int? Episode);
+
+    private static readonly System.Text.RegularExpressions.Regex SeasonEpisodePattern = new(
+        @"S(?<s>\d+)E(?<e>\d+)",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private ItemIds ResolveIds(BaseItem item)
+    {
+        var chain = new List<BaseItem?> { item };
+        AddParent(chain, item is Episode ep ? ep.SeasonId : Guid.Empty);
+        if (item is Episode episode)
+        {
+            AddParent(chain, episode.SeriesId);
+        }
+
+        AddParent(chain, item.ParentId);
+
+        int? Id(params string[] keys)
+        {
+            foreach (var candidate in chain)
+            {
+                var value = ProviderId(candidate, keys);
+                if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0)
+                {
+                    return parsed;
+                }
+            }
+
+            return null;
+        }
+
+        int? season = item.ParentIndexNumber;
+        int? number = item.IndexNumber;
+        if (season is null || number is null)
+        {
+            var match = SeasonEpisodePattern.Match((item.Path ?? string.Empty) + " " + (item.Name ?? string.Empty));
+            if (match.Success)
+            {
+                season ??= int.TryParse(match.Groups["s"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : null;
+                number ??= int.TryParse(match.Groups["e"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var e) ? e : null;
+            }
+        }
+
+        return new ItemIds(
+            Id("Tmdb", "TMDb"),
+            Id("Tvdb"),
+            Id("MyAnimeList", "Mal"),
+            Id("AniList"),
+            season,
+            number);
+    }
+
+    private void AddParent(List<BaseItem?> chain, Guid id)
+    {
+        if (id == Guid.Empty)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_library.GetItemById(id) is { } parent && chain.All(x => x?.Id != parent.Id))
+            {
+                chain.Add(parent);
+            }
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private static string FfmpegPath() =>

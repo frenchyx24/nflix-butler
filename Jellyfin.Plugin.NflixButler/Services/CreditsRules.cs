@@ -34,6 +34,9 @@ public sealed class CreditsInfo
 
     /// <summary>Gets or sets a value indicating whether the start was written as an Outro media segment.</summary>
     public bool SegmentStored { get; set; }
+
+    /// <summary>Gets or sets the cache schema version that produced this record; older records are re-queried.</summary>
+    public int Schema { get; set; }
 }
 
 /// <summary>One black interval reported by ffmpeg blackdetect, in seconds relative to the analysed window.</summary>
