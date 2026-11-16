@@ -158,7 +158,7 @@ public sealed class CreditsService
         var runtime = Seconds(item.RunTimeTicks ?? 0);
         var half = (item.RunTimeTicks ?? 0) / 2;
         var ids = ResolveIds(item);
-        _logger.LogInformation(
+        _logger.LogDebug(
             "Nflix Butler credits: ids for {Item} tmdb={Tmdb} tvdb={Tvdb} mal={Mal} anilist={AniList} season={Season} episode={Episode}",
             item.Name, ids.Tmdb, ids.Tvdb, ids.Mal, ids.AniList, ids.Season, ids.Episode);
 
@@ -392,7 +392,7 @@ public sealed class CreditsService
             using var response = await Http.GetAsync(url, cts.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogInformation("Nflix Butler credits: {Url} returned {Status}", url, (int)response.StatusCode);
+                _logger.LogDebug("Nflix Butler credits: {Url} returned {Status}", url, (int)response.StatusCode);
                 return null;
             }
 
