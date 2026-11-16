@@ -42,5 +42,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IStartupFilter, NflixWebThemeStartupFilter>();
         // Keep Seerr permission bitmasks inside int32 so the web Seerr plugin can parse its user list.
         serviceCollection.AddHostedService<SeerrGuardService>();
+        // Marks films and episodes as watched when the viewer reached the end credits.
+        serviceCollection.AddSingleton<WatchedTracker>();
+        serviceCollection.AddHostedService(provider => provider.GetRequiredService<WatchedTracker>());
     }
 }
