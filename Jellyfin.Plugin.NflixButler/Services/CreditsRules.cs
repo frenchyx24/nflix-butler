@@ -23,6 +23,9 @@ public sealed class CreditsInfo
     /// <summary>Gets or sets a short free-form detail (ids, match length...).</summary>
     public string? Detail { get; set; }
 
+    /// <summary>Gets or sets the runtime the answer applies to; a different file invalidates the cache.</summary>
+    public long RuntimeTicks { get; set; }
+
     /// <summary>Gets or sets when the lookup ran.</summary>
     public DateTime Utc { get; set; }
 

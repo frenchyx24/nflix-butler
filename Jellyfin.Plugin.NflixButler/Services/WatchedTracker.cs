@@ -78,11 +78,10 @@ public sealed class WatchedTracker : IHostedService, IDisposable
     private readonly IUserDataManager _userData;
     private readonly IUserManager _users;
     private readonly ILibraryManager _library;
-    private readonly IServiceProvider _services;
+    private readonly CreditsService _creditsService;
     private readonly ILogger<WatchedTracker> _logger;
     private readonly string _stateFile;
     private readonly ConcurrentDictionary<string, WatchedEntry> _entries = new();
-    private readonly ConcurrentDictionary<Guid, (long? Ticks, DateTime Utc)> _credits = new();
     private readonly ConcurrentQueue<WatchedLog> _log = new();
     private readonly object _saveLock = new();
     private readonly object _markLock = new();
@@ -96,7 +95,7 @@ public sealed class WatchedTracker : IHostedService, IDisposable
         IUserDataManager userData,
         IUserManager users,
         ILibraryManager library,
-        IServiceProvider services,
+        CreditsService creditsService,
         IApplicationPaths paths,
         ILogger<WatchedTracker> logger)
     {
@@ -104,7 +103,7 @@ public sealed class WatchedTracker : IHostedService, IDisposable
         _userData = userData;
         _users = users;
         _library = library;
-        _services = services;
+        _creditsService = creditsService;
         _logger = logger;
         var folder = Path.Combine(paths.PluginConfigurationsPath, "NflixButler");
         Directory.CreateDirectory(folder);
