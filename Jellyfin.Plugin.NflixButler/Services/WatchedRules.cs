@@ -30,6 +30,12 @@ public static class WatchedRules
     /// <summary>Minimum share of the runtime that must be reached by the last position.</summary>
     public const double MinimumProgress = 0.5;
 
+    /// <summary>Seconds before a known credits start that already count as watched.</summary>
+    public const int PositionToleranceSeconds = 5;
+
+    /// <summary>Seconds before a known credits start that count when the next episode started.</summary>
+    public const int NextEpisodeToleranceSeconds = 30;
+
     /// <summary>Computes where the credits zone starts, in ticks.</summary>
     public static long ZoneStart(long runtimeTicks, long? creditsStartTicks, bool isEpisode, WatchedThresholds t)
     {
@@ -76,16 +82,22 @@ public static class WatchedRules
         }
 
         var zone = ZoneStart(runtimeTicks, creditsStartTicks, isEpisode, t);
-        var source = creditsStartTicks is long c && c == zone ? "credits" : "threshold";
+        var precise = creditsStartTicks is long c && c == zone;
+        var source = precise ? "credits" : "threshold";
         var half = (long)(runtimeTicks * MinimumProgress);
 
-        if (positionTicks >= zone && positionTicks >= half)
+        // A real credits start is exact: tolerate the 5 s a viewer stops early, and 30 s before
+        // the credits when the next episode was started (autoplay, "next" button).
+        var watchFrom = precise ? Math.Max(half, zone - TimeSpan.FromSeconds(PositionToleranceSeconds).Ticks) : zone;
+        var nextFrom = precise ? Math.Max(half, zone - TimeSpan.FromSeconds(NextEpisodeToleranceSeconds).Ticks) : zone;
+
+        if (positionTicks >= watchFrom && positionTicks >= half)
         {
             return new WatchedDecision(true, source, zone);
         }
 
         var furthest = Math.Max(positionTicks, maxPositionTicks);
-        if (isEpisode && nextEpisodeStarted && furthest >= zone)
+        if (isEpisode && nextEpisodeStarted && furthest >= nextFrom)
         {
             return new WatchedDecision(true, "next-episode", zone);
         }
