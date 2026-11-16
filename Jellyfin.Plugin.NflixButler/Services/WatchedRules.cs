@@ -8,10 +8,10 @@ namespace Jellyfin.Plugin.NflixButler.Services;
 /// <param name="EpisodeMinRemainingSeconds">Episodes: remaining time that always counts as the credits zone.</param>
 /// <param name="EpisodeRemainingPercent">Episodes: remaining share of the runtime that counts as the credits zone.</param>
 public sealed record WatchedThresholds(
-    int FilmMinRemainingSeconds = 480,
-    double FilmRemainingPercent = 10,
-    int EpisodeMinRemainingSeconds = 150,
-    double EpisodeRemainingPercent = 8);
+    int FilmMinRemainingSeconds = 600,
+    double FilmRemainingPercent = 12,
+    int EpisodeMinRemainingSeconds = 240,
+    double EpisodeRemainingPercent = 10);
 
 /// <summary>Outcome of a watched decision.</summary>
 /// <param name="Watched">True when the item must be marked as played.</param>

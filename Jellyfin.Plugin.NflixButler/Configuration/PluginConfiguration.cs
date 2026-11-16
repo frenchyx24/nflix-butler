@@ -105,16 +105,16 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool WatchedEnabled { get; set; } = true;
 
     /// <summary>Films: remaining minutes that always count as the credits zone (zone = max(minutes, percent)).</summary>
-    public int WatchedFilmMinRemainingMinutes { get; set; } = 8;
+    public int WatchedFilmMinRemainingMinutes { get; set; } = 10;
 
     /// <summary>Films: remaining share of the runtime, in percent, that counts as the credits zone.</summary>
-    public int WatchedFilmRemainingPercent { get; set; } = 10;
+    public int WatchedFilmRemainingPercent { get; set; } = 12;
 
     /// <summary>Episodes: remaining seconds that always count as the credits zone.</summary>
-    public int WatchedEpisodeMinRemainingSeconds { get; set; } = 150;
+    public int WatchedEpisodeMinRemainingSeconds { get; set; } = 240;
 
     /// <summary>Episodes: remaining share of the runtime, in percent, that counts as the credits zone.</summary>
-    public int WatchedEpisodeRemainingPercent { get; set; } = 8;
+    public int WatchedEpisodeRemainingPercent { get; set; } = 10;
 
     /// <summary>Run a one-shot backfill of resume positions already in the credits zone at startup.</summary>
     public bool WatchedBackfillOnStart { get; set; } = false;
