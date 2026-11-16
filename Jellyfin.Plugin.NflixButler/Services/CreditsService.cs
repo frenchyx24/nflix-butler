@@ -702,18 +702,24 @@ public sealed class CreditsService
 
     private ItemIds ResolveIds(BaseItem item)
     {
-        var chain = new List<BaseItem?> { item };
-        AddParent(chain, item is Episode ep ? ep.SeasonId : Guid.Empty);
+        var parents = new List<BaseItem?>();
         if (item is Episode episode)
         {
-            AddParent(chain, episode.SeriesId);
+            AddParent(parents, episode.SeriesId);
+            AddParent(parents, episode.SeasonId);
         }
 
-        AddParent(chain, item.ParentId);
+        AddParent(parents, item.ParentId);
+
+        // Public databases want the series ids. Jellyfin stores episode-level ids on the episode
+        // itself, so the episode tmdb id was sent as a series id and TheIntroDB answered 404.
+        // Search the series and season first, then fall back to the item for anything missing.
+        var preferred = item is Episode ? parents.Concat(new BaseItem?[] { item }).ToList() : new List<BaseItem?> { item }.Concat(parents).ToList();
+        var fallback = new List<BaseItem?> { item }.Concat(parents).ToList();
 
         int? Id(params string[] keys)
         {
-            foreach (var candidate in chain)
+            foreach (var candidate in preferred.Concat(fallback))
             {
                 var value = ProviderId(candidate, keys);
                 if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0)
