@@ -125,7 +125,7 @@ public static class CreditsRules
 
             var start = c.Start + shift;
             var end = Math.Min(runtimeSeconds, c.End + shift);
-            if (IsPlausibleStart(start, runtimeSeconds))
+            if (IsPlausibleStart(start, runtimeSeconds, 0.3))
             {
                 return (start, end > start ? end : runtimeSeconds);
             }
@@ -154,7 +154,7 @@ public static class CreditsRules
 
                 var start = s.GetDouble() / 1000.0;
                 double? end = c.TryGetProperty("end_ms", out var e) && e.ValueKind == JsonValueKind.Number ? e.GetDouble() / 1000.0 : null;
-                if (IsPlausibleStart(start, runtimeSeconds))
+                if (IsPlausibleStart(start, runtimeSeconds, 0.3))
                 {
                     return (start, end);
                 }
@@ -186,7 +186,7 @@ public static class CreditsRules
 
             var start = s.GetDouble() / 1000.0;
             double? end = outro.TryGetProperty("end_ms", out var e) && e.ValueKind == JsonValueKind.Number ? e.GetDouble() / 1000.0 : null;
-            return IsPlausibleStart(start, runtimeSeconds) ? (start, end) : null;
+            return IsPlausibleStart(start, runtimeSeconds, 0.3) ? (start, end) : null;
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         {
@@ -194,9 +194,14 @@ public static class CreditsRules
         }
     }
 
-    /// <summary>A credits start is plausible past the middle and at least 5 s before the end.</summary>
-    public static bool IsPlausibleStart(double startSeconds, double runtimeSeconds)
-        => runtimeSeconds > 0 && startSeconds >= runtimeSeconds * WatchedRules.MinimumProgress && startSeconds < runtimeSeconds - 5;
+    /// <summary>A credits start is plausible past <paramref name="minRatio"/> of the runtime and at least 5 s before the end.</summary>
+    /// <remarks>
+    /// Curated databases use 0.3: Jellyfin runtimes are sometimes nearly double the real duration (file duration
+    /// from ffprobe can disagree), and a 0.5 floor then rejects a correct 1356 s answer for a 1532 s episode.
+    /// Local detection keeps 0.5 because a fingerprint match can be wrong.
+    /// </remarks>
+    public static bool IsPlausibleStart(double startSeconds, double runtimeSeconds, double minRatio = 0.5)
+        => runtimeSeconds > 0 && startSeconds >= runtimeSeconds * minRatio && startSeconds < runtimeSeconds - 5;
 
     /// <summary>Parses blackdetect lines from ffmpeg stderr.</summary>
     public static List<BlackInterval> ParseBlackDetect(string stderr)
