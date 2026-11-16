@@ -83,6 +83,7 @@ public sealed class WatchedTracker : IHostedService, IDisposable
     private readonly object _saveLock = new();
     private readonly object _markLock = new();
     private Timer? _timer;
+    private int _warming;
     private DateTime _lastSweepUtc = DateTime.MinValue;
     private int _dirty;
     private int _sweeping;
@@ -136,6 +137,11 @@ public sealed class WatchedTracker : IHostedService, IDisposable
         _sessions.PlaybackProgress += OnProgress;
         _sessions.PlaybackStopped += OnStopped;
         _timer = new Timer(_ => Tick(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            await WarmCreditsAsync().ConfigureAwait(false);
+        });
         _logger.LogInformation("Nflix Butler watched: tracking {Count} entries", _entries.Count);
 
         if (Config.WatchedBackfillOnStart)
@@ -342,6 +348,81 @@ public sealed class WatchedTracker : IHostedService, IDisposable
             runtime > 0 ? Math.Round(position * 100.0 / runtime, 1) : 0));
         while (_log.Count > MaxLog && _log.TryDequeue(out _))
         {
+        }
+    }
+
+    /// <summary>Resolves end credits for tracked episodes and their season so skip segments exist before playback.</summary>
+    private async Task WarmCreditsAsync()
+    {
+        if (!Config.CreditsEnabled || Interlocked.Exchange(ref _warming, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            var budget = 40;
+            var seen = new HashSet<Guid>();
+            foreach (var entry in _entries.Values.Where(x => x.IsEpisode).OrderByDescending(x => x.UpdatedUtc).Take(20))
+            {
+                if (_library.GetItemById(entry.ItemId) is not Episode episode || episode.RunTimeTicks is not long runtime || runtime <= 0)
+                {
+                    continue;
+                }
+
+                var season = _library.GetItemById(episode.SeasonId);
+                var candidates = new List<BaseItem> { episode };
+                if (season is not null)
+                {
+                    candidates.AddRange(_library.GetItemList(new InternalItemsQuery
+                    {
+                        ParentId = season.Id,
+                        IncludeItemTypes = new[] { BaseItemKind.Episode },
+                        Recursive = false,
+                        Limit = 24,
+                    }));
+                }
+
+                foreach (var item in candidates)
+                {
+                    if (budget-- <= 0 || !seen.Add(item.Id))
+                    {
+                        break;
+                    }
+
+                    try
+                    {
+                        var info = await _creditsService.ResolveAsync(item).ConfigureAwait(false);
+                        if (info.StartTicks is long start)
+                        {
+                            _logger.LogInformation(
+                                "Nflix Butler credits warm: {Item} start={Start} source={Source}",
+                                item.Name ?? string.Empty,
+                                start / (double)TimeSpan.TicksPerSecond,
+                                info.Source ?? "none");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Nflix Butler credits warm failed for {Item}", item.Name);
+                    }
+                }
+
+                if (budget <= 0)
+                {
+                    break;
+                }
+            }
+
+            Save();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nflix Butler credits warm failed");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _warming, 0);
         }
     }
 
