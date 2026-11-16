@@ -10,15 +10,12 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Configuration;
-using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Entities;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -348,51 +345,10 @@ public sealed class WatchedTracker : IHostedService, IDisposable
         }
     }
 
-    /// <summary>Start of the end credits: Outro media segment first, then a credits chapter.</summary>
+    /// <summary>Start of the end credits. All sources and caching live in CreditsService.</summary>
     private async Task<long?> GetCreditsStartAsync(BaseItem item)
     {
-        if (_credits.TryGetValue(item.Id, out var cached) && DateTime.UtcNow - cached.Utc < TimeSpan.FromHours(1))
-        {
-            return cached.Ticks;
-        }
-
-        long? result = null;
-        var half = (item.RunTimeTicks ?? 0) / 2;
-        try
-        {
-            if (_services.GetService<IMediaSegmentManager>() is { } segments)
-            {
-                var found = await segments.GetSegmentsAsync(
-                    item, new[] { MediaSegmentType.Outro }, _library.GetLibraryOptions(item), false).ConfigureAwait(false);
-                result = found
-                    .Where(s => s.Type == MediaSegmentType.Outro && s.StartTicks > 0 && s.StartTicks >= half)
-                    .Select(s => (long?)s.StartTicks)
-                    .Min();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Nflix Butler watched: no media segments for {Item}", item.Name);
-        }
-
-        if (result is null)
-        {
-            try
-            {
-                var chapters = _services.GetService<IChapterManager>()?.GetChapters(item.Id);
-                result = chapters?
-                    .Where(c => WatchedRules.IsCreditsChapter(c.Name) && c.StartPositionTicks >= half && c.StartPositionTicks > 0)
-                    .Select(c => (long?)c.StartPositionTicks)
-                    .Min();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Nflix Butler watched: no chapters for {Item}", item.Name);
-            }
-        }
-
-        _credits[item.Id] = (result, DateTime.UtcNow);
-        return result;
+        return await _creditsService.GetCreditsStartTicksAsync(item).ConfigureAwait(false);
     }
 
     private void Tick()
