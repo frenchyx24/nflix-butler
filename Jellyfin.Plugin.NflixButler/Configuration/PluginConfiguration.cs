@@ -122,6 +122,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Backfill only logs what it would mark, without marking anything.</summary>
     public bool BackfillDryRun { get; set; } = true;
 
+    /// <summary>Look up where the end credits start (media segments, AniSkip, TheIntroDB) instead of a plain threshold.</summary>
+    public bool CreditsEnabled { get; set; } = true;
+
+    /// <summary>Allow the slow background ffmpeg detection (fingerprints, black frames) when no database knows the credits.</summary>
+    public bool CreditsLocalDetection { get; set; } = true;
+
+    /// <summary>Store detected credits as an Outro media segment so the skip-credits button also benefits.</summary>
+    public bool CreditsWriteSegments { get; set; } = true;
+
     /// <summary>Video containers the butler reacts to.</summary>
     public string[] VideoExtensions { get; set; } =
     {
