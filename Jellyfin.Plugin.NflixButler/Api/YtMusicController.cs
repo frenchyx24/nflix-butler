@@ -107,8 +107,10 @@ public class YtMusicController : ControllerBase
         // No per-IP throttle: behind the reverse proxy every user shares one address, and the
         // client already debounces. YtMusicService serialises yt-dlp runs (2 at a time) and the
         // 24 h search cache keeps the real load low.
+        q = InputLimits.ClipQuery(q);
         if (string.IsNullOrWhiteSpace(q))
             return Ok(new { results = Array.Empty<object>(), albums = Array.Empty<object>(), artists = Array.Empty<object>() });
+        if (!UserRateLimiter.Allow(User, RateBucket.Search)) return UserRateLimiter.Refused();
 
         try
         {
@@ -178,7 +180,9 @@ public class YtMusicController : ControllerBase
     [HttpGet("artist")]
     public async Task<IActionResult> Artist([FromQuery] string name, [FromQuery] int limit = 30, CancellationToken ct = default)
     {
+        name = InputLimits.ClipQuery(name);
         if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "name requis" });
+        if (!UserRateLimiter.Allow(User, RateBucket.Search)) return UserRateLimiter.Refused();
         try
         {
             var hits = await _yt.SearchAsync(name, limit, ct);

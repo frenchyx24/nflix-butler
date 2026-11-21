@@ -544,6 +544,7 @@ public class SyncController : ControllerBase
     public async Task<IActionResult> Import([FromBody] ImportRequest request, CancellationToken ct)
     {
         if (IsOtherUser(request.UserId)) return Forbid();
+        if (!UserRateLimiter.Allow(User, RateBucket.ImportUrl)) return UserRateLimiter.Refused();
         if (!CallerIdentity.IsPlaylistId(request.PlaylistId))
             return BadRequest(new { message = "playlistId invalide" });
         var account = _store.Get(request.UserId ?? "", (request.Service ?? "").ToLowerInvariant());
@@ -666,6 +667,8 @@ public class SyncController : ControllerBase
     public async Task<IActionResult> ImportUrl([FromBody] UrlImportRequest request, CancellationToken ct)
     {
         if (IsOtherUser(request.UserId)) return Forbid();
+        if ((request.Url ?? "").Length > 2048) return BadRequest(new { message = "Lien trop long." });
+        if (!UserRateLimiter.Allow(User, RateBucket.ImportUrl)) return UserRateLimiter.Refused();
         if (!Uri.TryCreate((request.Url ?? "").Trim(), UriKind.Absolute, out var uri) || !LinkAllowed(uri))
             return BadRequest(new { message = "Lien non reconnu : collez le lien de partage d'une playlist Deezer, Spotify ou YouTube Music." });
         try
@@ -862,7 +865,9 @@ public class SyncController : ControllerBase
     [HttpGet("deezer-search")]
     public async Task<IActionResult> DeezerSearch([FromQuery] string q, CancellationToken ct)
     {
+        q = InputLimits.ClipQuery(q);
         if (string.IsNullOrWhiteSpace(q)) return Ok(new { tracks = Array.Empty<object>() });
+        if (!UserRateLimiter.Allow(User, RateBucket.Search)) return UserRateLimiter.Refused();
         try
         {
             var json = await Http.GetStringAsync("https://api.deezer.com/search?q=" + Uri.EscapeDataString(q) + "&limit=5", ct);
@@ -894,6 +899,7 @@ public class SyncController : ControllerBase
         if (IsOtherUser(request.UserId)) return Forbid();
         var account = _store.Get(request.UserId ?? "", "deezer");
         if (account == null) return StatusCode(412, new { message = "Compte Deezer non lié." });
+        if (!UserRateLimiter.Allow(User, RateBucket.ExportDeezer)) return UserRateLimiter.Refused();
 
         try
         {

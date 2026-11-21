@@ -192,7 +192,7 @@ public sealed class PendingMusicService : BackgroundService
                 var key = ArtistNames.Key(name);
                 if (key.Length < 2 || _artistQueue.Any(q => ArtistNames.Key(q) == key)) continue;
                 if (ArtistsDone.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromDays(14)) continue;
-                _artistQueue.Enqueue(name);
+                if (!InputLimits.TryEnqueue(_artistQueue, name, InputLimits.ArtistQueue)) continue;
                 ArtistNamesSeen[key] = name;
             }
             try { File.WriteAllText(ArtistNamesPath, JsonSerializer.Serialize(ArtistNamesSeen, Options)); } catch { }

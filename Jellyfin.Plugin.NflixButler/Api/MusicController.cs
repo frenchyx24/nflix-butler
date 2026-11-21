@@ -105,11 +105,13 @@ public class MusicController : ControllerBase
     [HttpGet("search")]
     public async Task<IActionResult> Search([FromQuery] string q, [FromQuery] int limit = 20, CancellationToken ct = default)
     {
+        q = InputLimits.ClipQuery(q);
         if (string.IsNullOrWhiteSpace(q))
             return Ok(new { tracks = Array.Empty<object>(), albums = Array.Empty<object>(), artists = Array.Empty<object>() });
+        if (!UserRateLimiter.Allow(User, RateBucket.Search)) return UserRateLimiter.Refused();
         try
         {
-            var (tracks, albums, artists) = await _catalog.SearchAsync(q, limit, ct);
+            var (tracks, albums, artists) = await _catalog.SearchAsync(q, Math.Clamp(limit, 1, 50), ct);
             _yt.Store.RecordUserSearch(CallerIdentity.HistoryKey(User), q);
             _yt.Store.Save();
             return Ok(new
@@ -129,6 +131,7 @@ public class MusicController : ControllerBase
     [HttpGet("artist")]
     public async Task<IActionResult> Artist([FromQuery] string? id, [FromQuery] string? name, CancellationToken ct = default)
     {
+        if (!UserRateLimiter.Allow(User, RateBucket.Search)) return UserRateLimiter.Refused();
         try
         {
             CatalogArtist? artist = null;
@@ -390,6 +393,7 @@ public class MusicController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) || artist.Length > 300 || title.Length > 300)
             return BadRequest(new { message = "artist et title requis" });
+        if (!UserRateLimiter.Allow(User, RateBucket.Lyrics)) return UserRateLimiter.Refused();
         try
         {
             var entry = await _lyrics.GetAsync(artist, title, album ?? "", Math.Clamp(duration, 0, 7200), ct);
@@ -415,6 +419,7 @@ public class MusicController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) || artist.Length > 300 || title.Length > 300)
             return BadRequest(new { message = "artist et title requis" });
+        if (!UserRateLimiter.Allow(User, RateBucket.Cover)) return UserRateLimiter.Refused();
         try
         {
             var cover = await _catalog.FindCoverAsync(artist, title, album ?? "", ct);
@@ -433,6 +438,7 @@ public class MusicController : ControllerBase
     [HttpGet("pictures")]
     public async Task<IActionResult> Pictures([FromQuery] string? names, CancellationToken ct = default)
     {
+        if (!UserRateLimiter.Allow(User, RateBucket.Pictures)) return UserRateLimiter.Refused();
         var wanted = (names ?? "").Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(n => n.Length is > 0 and <= 200).Distinct(StringComparer.OrdinalIgnoreCase).Take(120).ToList();
         var result = new Dictionary<string, string>();

@@ -84,6 +84,10 @@ public sealed class UserRateLimiter
         if (_entries.Count >= MaxKeys) _entries.Clear();
     }
 
+    /// <summary>The 429 response returned when [Allow] refuses a call.</summary>
+    public static Microsoft.AspNetCore.Mvc.ObjectResult Refused() =>
+        new(new { message = Message }) { StatusCode = 429 };
+
     /// <summary>Shared limiter check for the caller of a controller action.</summary>
     public static bool Allow(ClaimsPrincipal? user, RateBucket bucket) =>
         Shared.TryAcquire(CallerIdentity.HistoryKey(user), bucket);
